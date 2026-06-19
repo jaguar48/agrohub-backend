@@ -177,9 +177,19 @@ namespace AgricHub.BLL.Implementations.ChatServices
             {
                 Console.WriteLine($"[Sendbird] CreateNotificationChannel response ({(int)response.StatusCode}): {content}");
 
-                // 400 with "already" in message = channel already exists, that's fine
-                if (!content.Contains("already", StringComparison.OrdinalIgnoreCase))
+                // Channel already existing is NOT an error — expected for any user
+                // who has received a notification before. Sendbird's actual message
+                // is `"channel_url" violates unique constraint.` (code 400202), which
+                // does NOT contain "already", so we check for both.
+                var channelAlreadyExists =
+                    content.Contains("already", StringComparison.OrdinalIgnoreCase) ||
+                    content.Contains("unique constraint", StringComparison.OrdinalIgnoreCase) ||
+                    content.Contains("400202");
+
+                if (!channelAlreadyExists)
                     throw new Exception($"Failed to create notification channel: {content}");
+
+                Console.WriteLine($"[Sendbird] Notification channel already exists (expected): {channelUrl}");
             }
             else
             {
@@ -283,10 +293,17 @@ namespace AgricHub.BLL.Implementations.ChatServices
                 throw new Exception($"Failed to send admin message: {content}");
         }
 
+        // ── FIXED: Sendbird's "List messages" endpoint requires a message_ts
+        // anchor + prev_limit/next_limit — it does NOT accept a plain "limit"
+        // param. The old query (?message_type=ADMM&limit=30&reverse=true) was
+        // being rejected/misread by Sendbird, so the bell always looked empty
+        // even after a notification was sent successfully. ────────────────────
         public async Task<List<NotificationHistoryItem>> GetNotificationHistoryAsync(string userId, int limit = 30)
         {
             var channelUrl = $"notif-{userId}";
-            var url = $"https://api-{_sendbirdAppId}.sendbird.com/v3/group_channels/{channelUrl}/messages?message_type=ADMM&limit={limit}&reverse=true";
+            var nowTs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var url = $"https://api-{_sendbirdAppId}.sendbird.com/v3/group_channels/{channelUrl}/messages" +
+                      $"?message_ts={nowTs}&prev_limit={limit}&next_limit=0&include=true&reverse=true&message_type=ADMM";
 
             var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.Add("Api-Token", _sendbirdApiToken);
@@ -296,6 +313,8 @@ namespace AgricHub.BLL.Implementations.ChatServices
 
             if (!response.IsSuccessStatusCode)
             {
+                Console.WriteLine($"[Sendbird] GetNotificationHistory response ({(int)response.StatusCode}) for {channelUrl}: {content}");
+
                 // Channel doesn't exist yet (no notifications ever sent) — return empty list
                 if (response.StatusCode == System.Net.HttpStatusCode.NotFound ||
                     response.StatusCode == System.Net.HttpStatusCode.BadRequest)
@@ -303,6 +322,8 @@ namespace AgricHub.BLL.Implementations.ChatServices
 
                 throw new Exception($"Failed to fetch notification history: {content}");
             }
+
+            Console.WriteLine($"[Sendbird] GetNotificationHistory OK for {channelUrl} — raw response: {content}");
 
             var data = JsonConvert.DeserializeObject<dynamic>(content);
             var result = new List<NotificationHistoryItem>();
@@ -319,6 +340,8 @@ namespace AgricHub.BLL.Implementations.ChatServices
                     CreatedAt = (long)(m.created_at ?? 0),
                 });
             }
+
+            Console.WriteLine($"[Sendbird] GetNotificationHistory parsed {result.Count} item(s) for {channelUrl}.");
 
             return result;
         }

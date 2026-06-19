@@ -10,10 +10,10 @@ namespace AgricHub.BLL.Implementations.BusinessServices
     ///   - Consultant no-show grace periods expired       → full refund to customer
     ///   - Customer no-show grace periods expired         → 50/50 split
     ///   - Pending-approval windows (72h) expired         → auto-release escrow to consultant
-    ///   - InProgress sessions past duration + 2h grace   → flag as OverdueReview + notify consultant
+    ///   - InProgress sessions past duration + 2h grace   → flag as OverdueReview + notify
     ///
-    /// Runs every 5 minutes inside this process for its entire lifetime.
-    /// Register with: builder.Services.AddHostedService&lt;ExpirySweepService&gt;();
+    /// Runs every 5 minutes. Register with:
+    ///   builder.Services.AddHostedService&lt;ExpirySweepService&gt;();
     /// </summary>
     public class ExpirySweepService : BackgroundService
     {
@@ -29,60 +29,45 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            _logger.LogInformation("[ExpirySweep] Started — running every {Interval}.", Interval);
-            using var timer = new PeriodicTimer(Interval);
+            _logger.LogInformation("[ExpirySweep] Service started — sweeping every {Interval}.", Interval);
 
-            // Run once immediately on startup, then on each tick.
+            using var timer = new PeriodicTimer(Interval);
             do
             {
                 await RunSweepAsync(stoppingToken);
             }
             while (!stoppingToken.IsCancellationRequested
                    && await timer.WaitForNextTickAsync(stoppingToken));
+
+            _logger.LogInformation("[ExpirySweep] Service stopping.");
         }
 
         private async Task RunSweepAsync(CancellationToken ct)
         {
-            // Each iteration gets its own scope — IConsultationService and its
-            // dependencies (DbContext, IUnitOfWork, etc.) are scoped services,
-            // and BackgroundService runs outside the normal request scope.
+            _logger.LogDebug("[ExpirySweep] Sweep cycle starting at {Time} UTC.", DateTime.UtcNow);
+
             using var scope = _scopeFactory.CreateScope();
             var svc = scope.ServiceProvider.GetRequiredService<IConsultationService>();
 
-            try
-            {
-                await svc.ProcessExpiredNoShowsAsync();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "[ExpirySweep] ProcessExpiredNoShowsAsync failed.");
-            }
+            await Run(svc.ProcessExpiredNoShowsAsync, "ProcessExpiredNoShows");
+            await Run(svc.ProcessExpiredCustomerNoShowsAsync, "ProcessExpiredCustomerNoShows");
+            await Run(svc.ProcessExpiredApprovalsAsync, "ProcessExpiredApprovals");
+            await Run(svc.ProcessOverdueInProgressSessionsAsync, "ProcessOverdueInProgressSessions");
 
-            try
-            {
-                await svc.ProcessExpiredCustomerNoShowsAsync();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "[ExpirySweep] ProcessExpiredCustomerNoShowsAsync failed.");
-            }
+            _logger.LogDebug("[ExpirySweep] Sweep cycle complete.");
+        }
 
+        private async Task Run(Func<Task> fn, string name)
+        {
             try
             {
-                await svc.ProcessExpiredApprovalsAsync();
+                _logger.LogDebug("[ExpirySweep] Running {Name}…", name);
+                await fn();
+                _logger.LogDebug("[ExpirySweep] {Name} completed.", name);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "[ExpirySweep] ProcessExpiredApprovalsAsync failed.");
-            }
-
-            try
-            {
-                await svc.ProcessOverdueInProgressSessionsAsync();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "[ExpirySweep] ProcessOverdueInProgressSessionsAsync failed.");
+                _logger.LogError(ex, "[ExpirySweep] {Name} failed.", name);
             }
         }
     }

@@ -24,6 +24,7 @@ namespace AgricHub.BLL.Interfaces.IBusinessServices
         Task DismissNoShowRequestAsync(Guid consultationId);
         Task ProcessExpiredNoShowsAsync();
         Task ProcessExpiredNoShowForConsultationAsync(Guid consultationId);
+        Task<int> GetActiveBookingsCountAsync(int consultantId);
 
         // ── No-show (consultant reports customer) ─────────────────────────────
         Task<ConsultationResponse> ReportCustomerNoShowAsync(Guid consultationId);

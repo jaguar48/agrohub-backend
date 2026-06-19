@@ -271,6 +271,23 @@ namespace AgricHub.Presentation.Controllers.BusinessController
             catch (InvalidOperationException ex) { return BadRequest(new { message = ex.Message }); }
         }
 
+        [HttpGet("consultant/{consultantId}/active-count")]
+        [Authorize]
+        public async Task<IActionResult> GetActiveBookingsCount(int consultantId)
+        {
+            try
+            {
+                var count = await _consultationService.GetActiveBookingsCountAsync(consultantId);
+                return Ok(new { activeCount = count });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ActiveBookings] Failed for consultant {consultantId}: {ex.Message}");
+                return Ok(new { activeCount = 0 });
+            }
+        }
+
+
     }
 
     // ── DTOs ──────────────────────────────────────────────────────────────────
