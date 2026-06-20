@@ -203,41 +203,74 @@ namespace AgricHub.BLL.Implementations.ChatServices
         {
             Console.WriteLine($"[Sendbird] >>> SendNotificationAsync CALLED — userId={userId}, type={type}");
 
+            // ── FIX: Validate inputs before attempting anything ────────────────
+            // Sending to a null/empty userId causes a misleading 404 from Sendbird
+            // that looks like a channel error. Catch it here with a clear message.
+            if (string.IsNullOrWhiteSpace(userId))
+            {
+                Console.WriteLine($"[Sendbird] ⚠️  SendNotificationAsync called with null/empty userId — skipping (type={type}, message=\"{message}\")");
+                return;
+            }
+
             try
             {
                 // Create channel on-demand for existing users who registered before this feature
                 var channelUrl = await CreateNotificationChannelAsync(userId, userId);
 
-                var request = new HttpRequestMessage(HttpMethod.Post,
-                    $"https://api-{_sendbirdAppId}.sendbird.com/v3/group_channels/{channelUrl}/messages")
+                var payload = JsonConvert.SerializeObject(new
                 {
-                    Content = new StringContent(JsonConvert.SerializeObject(new
+                    message_type = "ADMM",
+                    message,
+                    custom_type = type,
+                    data = JsonConvert.SerializeObject(new
                     {
-                        message_type = "ADMM",
-                        message,
-                        custom_type = type,
-                        data = JsonConvert.SerializeObject(new
-                        {
-                            type,
-                            payload = data,
-                            timestamp = DateTime.UtcNow
-                        })
-                    }), Encoding.UTF8, "application/json")
-                };
-                request.Headers.Add("Api-Token", _sendbirdApiToken);
+                        type,
+                        payload = data,
+                        timestamp = DateTime.UtcNow
+                    })
+                });
 
-                var response = await _httpClient.SendAsync(request);
-                var content = await response.Content.ReadAsStringAsync();
+                // ── FIX: Retry once on transient 5xx errors ───────────────────
+                // Sendbird occasionally returns 503 under load. A single retry
+                // catches the vast majority of transient failures without
+                // introducing meaningful latency for the business action.
+                HttpResponseMessage response = null!;
+                string content = string.Empty;
+
+                for (int attempt = 1; attempt <= 2; attempt++)
+                {
+                    var request = new HttpRequestMessage(HttpMethod.Post,
+                        $"https://api-{_sendbirdAppId}.sendbird.com/v3/group_channels/{channelUrl}/messages")
+                    {
+                        Content = new StringContent(payload, Encoding.UTF8, "application/json")
+                    };
+                    request.Headers.Add("Api-Token", _sendbirdApiToken);
+
+                    response = await _httpClient.SendAsync(request);
+                    content  = await response.Content.ReadAsStringAsync();
+
+                    if (response.IsSuccessStatusCode)
+                        break;
+
+                    var statusCode = (int)response.StatusCode;
+                    Console.WriteLine($"[Sendbird] ❌ Notification SEND attempt {attempt}/2 FAILED ({statusCode}) for {userId}: {content}");
+
+                    // Only retry on server-side errors — 4xx means bad request, no point retrying
+                    if (statusCode < 500 || attempt == 2) break;
+
+                    await Task.Delay(500); // brief pause before retry
+                }
 
                 if (!response.IsSuccessStatusCode)
-                    Console.WriteLine($"[Sendbird] ❌ Notification SEND FAILED ({(int)response.StatusCode}) for {userId}: {content}");
+                    Console.WriteLine($"[Sendbird] ❌ Notification SEND FAILED (all attempts) for userId={userId}, type={type}: {content}");
                 else
                     Console.WriteLine($"[Sendbird] ✅ Notification SENT to {channelUrl}: \"{message}\"");
             }
             catch (Exception ex)
             {
-                // Never crash a business action because of a notification
-                Console.WriteLine($"[Sendbird] ❌ Notification ERROR for {userId}: {ex.GetType().Name} — {ex.Message}");
+                // Never crash a business action because of a notification failure.
+                // Log enough detail to diagnose the root cause from server logs.
+                Console.WriteLine($"[Sendbird] ❌ Notification ERROR for userId={userId}, type={type}: {ex.GetType().Name} — {ex.Message}");
                 if (ex.InnerException != null)
                     Console.WriteLine($"[Sendbird]    Inner: {ex.InnerException.Message}");
             }
