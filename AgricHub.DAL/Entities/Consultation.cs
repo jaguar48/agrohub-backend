@@ -19,6 +19,13 @@ namespace AgricHub.DAL.Entities
         public int? ServicePackageId { get; set; }
         public ServicePackage ServicePackage { get; set; }
         public DateTime ScheduledAt { get; set; }
+        public DateTime? PendingReminderSentAt { get; set; }  // Pending unanswered -> consultant nudge
+        public DateTime? PendingCancelNudgeSentAt { get; set; }  // Pending unanswered -> customer "you can cancel" notice
+        public DateTime? ApprovedStartReminderSentAt { get; set; }  // Approved, scheduled time passed, not started
+        public DateTime? PendingApprovalReminderSentAt { get; set; }  // PendingApproval idle reminder
+        public DateTime? OverdueReviewReminderSentAt { get; set; }  // Last re-reminder timestamp while stuck in OverdueReview
+
+
         public DateTime EndAt { get; set; }
         public string Status { get; set; }
         public string SendbirdChannelUrl { get; set; }

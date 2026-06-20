@@ -109,8 +109,6 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             using var stream = new FileStream(fullPath, FileMode.Create);
             await file.CopyToAsync(stream);
 
-            // Relative path — served at /Resources/Completions/{file} per the
-            // app.UseStaticFiles(...) mapping for the Resources folder in Program.cs
             return Path.Combine("Resources", "Completions", fileName).Replace("\\", "/");
         }
 
@@ -142,17 +140,12 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 b => b.Id == service.BusinessId && b.ConsultantId == consultant.Id)
                 ?? throw new UnauthorizedAccessException("This service does not belong to the specified consultant.");
 
-            // ── Validation ──────────────────────────────────────────────────────
-
-            // 1. Reject past dates
             if (dto.ScheduledAt < DateTime.UtcNow)
                 throw new InvalidOperationException("Cannot book a consultation in the past. Please choose a future date and time.");
 
-            // 2. Require at least 1 hour advance notice
             if (dto.ScheduledAt < DateTime.UtcNow.AddHours(1))
                 throw new InvalidOperationException("Bookings must be made at least 1 hour in advance.");
 
-            // 3. Consultant conflict — check for any ACTIVE booking that overlaps this time window
             var sessionEnd = dto.ScheduledAt.AddMinutes(package.DurationMinutes);
             var consultantConflict = await _consultationRepo.AnyAsync(c =>
                 c.ConsultantId == consultant.Id &&
@@ -162,7 +155,6 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             if (consultantConflict)
                 throw new InvalidOperationException("This consultant already has a booking during that time. Please choose a different slot.");
 
-            // 4. Customer conflict — prevent the customer from double-booking themselves
             var customerConflict = await _consultationRepo.AnyAsync(c =>
                 c.CustomerId == customer.Id &&
                 (c.Status == "Pending" || c.Status == "Approved" || c.Status == "InProgress") &&
@@ -381,7 +373,6 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             if (consultation.Status != "Approved")
                 throw new InvalidOperationException("Only approved consultations can be started.");
 
-            // ── 30-minute start window ─────────────────────────────────────────────
             var canStartFrom = consultation.ScheduledAt.AddMinutes(-30);
             if (DateTime.UtcNow < canStartFrom)
                 throw new InvalidOperationException(
@@ -455,7 +446,6 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             await EnsureConsultantOwnershipAsync(consultation, userId);
 
-            // Accept InProgress and OverdueReview
             if (consultation.Status != "InProgress" && consultation.Status != "OverdueReview")
                 throw new InvalidOperationException("Only in-progress or overdue consultations can be submitted for review.");
 
@@ -643,7 +633,6 @@ namespace AgricHub.BLL.Implementations.BusinessServices
         }
 
         // ── Admin: resolve a dispute ────────────────────────────────────────────
-        // resolution: "Release" (full escrow → consultant wallet) or "Refund" (full escrow → customer wallet)
 
         public async Task ResolveDisputeAsync(Guid consultationId, string resolution, string? notes)
         {
@@ -1116,7 +1105,6 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                                .Include(c => c.Service).Include(c => c.ServicePackage))
                 ?? throw new KeyNotFoundException("Consultation not found.");
 
-            // Only the customer can directly reschedule — consultants use RequestRescheduleAsync
             var customer = await _customerRepo.GetSingleByAsync(c => c.UserId == userId);
             if (customer == null || customer.Id != consultation.CustomerId)
                 throw new UnauthorizedAccessException(
@@ -1136,6 +1124,8 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             consultation.NoShowProcessed         = false;
             consultation.RescheduleRequestedAt   = null;
             consultation.RescheduleRequestReason = null;
+            // Reset the start-reminder flag — new schedule means a new potential reminder window
+            consultation.ApprovedStartReminderSentAt = null;
             await _consultationRepo.UpdateAsync(consultation);
             await _unitOfWork.SaveChangesAsync();
 
@@ -1303,6 +1293,8 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             _logger.LogInformation("[CustomerNoShowRequest] Consultant reported customer no-show for consultation {Id} · Grace: {Hours}h.", consultationId, graceHours);
         }
 
+        // ── Active bookings count (public — shown on consultant's profile page) ──
+
         public async Task<int> GetActiveBookingsCountAsync(int consultantId)
         {
             var activeStatuses = new[] { "Pending", "Approved", "InProgress", "OverdueReview" };
@@ -1310,11 +1302,8 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 c.ConsultantId == consultantId && activeStatuses.Contains(c.Status));
 
             _logger.LogDebug("[ActiveBookings] Consultant {ConsultantId} has {Count} active booking(s).", consultantId, count);
-
-            return (int)count;   // ← explicit cast from long to int
+            return (int)count;
         }
-
-
 
         // ── Dismiss customer no-show (customer says "I'm joining") ────────────
 
@@ -1464,7 +1453,6 @@ namespace AgricHub.BLL.Implementations.BusinessServices
         }
 
         // ── Flag overdue InProgress sessions (background sweep) ──────────────
-        // After StartedAt + durationMinutes + 2h grace, status → OverdueReview.
 
         public async Task ProcessOverdueInProgressSessionsAsync()
         {
@@ -1512,6 +1500,140 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             {
                 _logger.LogDebug("[OverdueReview] No sessions overdue at this time.");
             }
+        }
+
+        // ── Soft reminder sweep — nudges for stuck-but-not-yet-failed states ──
+        // Unlike the other sweeps (which auto-resolve after a deadline), these
+        // never change status or move money — they just send a one-time (or
+        // periodic) notification so nobody is left waiting in silence.
+
+        public async Task ProcessReminderNotificationsAsync()
+        {
+            await RemindStalePendingBookingsAsync();
+            await RemindApprovedNotStartedAsync();
+            await RemindPendingApprovalIdleAsync();
+            await RemindOverdueReviewStillUnresolvedAsync();
+        }
+
+        // 1. Pending booking unanswered: 12h -> nudge consultant; 24h -> tell customer they can cancel
+        private async Task RemindStalePendingBookingsAsync()
+        {
+            var all = await _consultationRepo.GetAllAsync(
+                c => c.Status == "Pending",
+                include: q => q.Include(c => c.Customer).Include(c => c.Consultant).Include(c => c.Service));
+
+            var changed = 0;
+
+            foreach (var c in all)
+            {
+                var age = DateTime.UtcNow - c.CreatedAt;
+
+                if (age >= TimeSpan.FromHours(12) && c.PendingReminderSentAt == null)
+                {
+                    await _sendbirdService.SendNotificationAsync(c.Consultant.UserId,
+                        $"⏳ You have an unanswered booking request from {c.Customer.FirstName} {c.Customer.LastName} · {c.Service.ServiceName} · Please approve or reject",
+                        "pending_reminder");
+                    c.PendingReminderSentAt = DateTime.UtcNow;
+                    await _consultationRepo.UpdateAsync(c);
+                    changed++;
+                    _logger.LogInformation("[Reminder] Pending nudge sent to consultant for consultation {Id} (age: {Age:F1}h).", c.Id, age.TotalHours);
+                }
+
+                if (age >= TimeSpan.FromHours(24) && c.PendingCancelNudgeSentAt == null)
+                {
+                    await _sendbirdService.SendNotificationAsync(c.Customer.UserId,
+                        $"⏳ Your booking with {c.Consultant.FirstName} {c.Consultant.LastName} for {c.Service.ServiceName} hasn't been answered in 24h · You can cancel for a full refund if you'd like",
+                        "pending_cancel_available");
+                    c.PendingCancelNudgeSentAt = DateTime.UtcNow;
+                    await _consultationRepo.UpdateAsync(c);
+                    changed++;
+                    _logger.LogInformation("[Reminder] Cancel-available nudge sent to customer for consultation {Id} (age: {Age:F1}h).", c.Id, age.TotalHours);
+                }
+            }
+
+            if (changed > 0) await _unitOfWork.SaveChangesAsync();
+        }
+
+        // 2. Approved, scheduled time passed, never started: one-time nudge to consultant
+        private async Task RemindApprovedNotStartedAsync()
+        {
+            var all = await _consultationRepo.GetAllAsync(
+                c => c.Status == "Approved" && c.ApprovedStartReminderSentAt == null,
+                include: q => q.Include(c => c.Customer).Include(c => c.Consultant).Include(c => c.Service));
+
+            var changed = 0;
+
+            foreach (var c in all)
+            {
+                if (DateTime.UtcNow < c.ScheduledAt) continue;
+
+                await _sendbirdService.SendNotificationAsync(c.Consultant.UserId,
+                    $"⏰ Your session with {c.Customer.FirstName} {c.Customer.LastName} for {c.Service.ServiceName} was scheduled to start now · Please start the session",
+                    "approved_start_reminder");
+                c.ApprovedStartReminderSentAt = DateTime.UtcNow;
+                await _consultationRepo.UpdateAsync(c);
+                changed++;
+                _logger.LogInformation("[Reminder] Start-now nudge sent to consultant for consultation {Id}.", c.Id);
+            }
+
+            if (changed > 0) await _unitOfWork.SaveChangesAsync();
+        }
+
+        // 3. PendingApproval idle for 24h: one-time nudge to customer
+        private async Task RemindPendingApprovalIdleAsync()
+        {
+            var all = await _consultationRepo.GetAllAsync(
+                c => c.Status == "PendingApproval" && c.CompletionSubmittedAt.HasValue && c.PendingApprovalReminderSentAt == null,
+                include: q => q.Include(c => c.Customer).Include(c => c.Consultant).Include(c => c.Service));
+
+            var changed = 0;
+
+            foreach (var c in all)
+            {
+                var age = DateTime.UtcNow - c.CompletionSubmittedAt!.Value;
+                if (age < TimeSpan.FromHours(24)) continue;
+
+                var hoursLeft = CompletionApprovalGraceHours - (int)age.TotalHours;
+                await _sendbirdService.SendNotificationAsync(c.Customer.UserId,
+                    $"📄 Reminder: {c.Consultant.FirstName} {c.Consultant.LastName}'s submission for {c.Service.ServiceName} is awaiting your review · Auto-releases in ~{Math.Max(hoursLeft, 0)}h",
+                    "pending_approval_reminder");
+                c.PendingApprovalReminderSentAt = DateTime.UtcNow;
+                await _consultationRepo.UpdateAsync(c);
+                changed++;
+                _logger.LogInformation("[Reminder] Review nudge sent to customer for consultation {Id} (age: {Age:F1}h).", c.Id, age.TotalHours);
+            }
+
+            if (changed > 0) await _unitOfWork.SaveChangesAsync();
+        }
+
+        // 4. OverdueReview stuck: re-reminder every 24h to both parties
+        private async Task RemindOverdueReviewStillUnresolvedAsync()
+        {
+            var all = await _consultationRepo.GetAllAsync(
+                c => c.Status == "OverdueReview",
+                include: q => q.Include(c => c.Customer).Include(c => c.Consultant).Include(c => c.Service));
+
+            var changed = 0;
+
+            foreach (var c in all)
+            {
+                var lastReminder = c.OverdueReviewReminderSentAt ?? c.StartedAt ?? c.CreatedAt;
+                if (DateTime.UtcNow - lastReminder < TimeSpan.FromHours(24)) continue;
+
+                await _sendbirdService.SendNotificationAsync(c.Consultant.UserId,
+                    $"⏰ Still overdue: {c.Service.ServiceName} with {c.Customer.FirstName} {c.Customer.LastName} needs your work summary to release escrow",
+                    "overdue_review_reminder");
+                await _sendbirdService.SendNotificationAsync(c.Customer.UserId,
+                    $"⏰ Still waiting: your {c.Service.ServiceName} session is overdue for review · You may report a no-show if it didn't happen",
+                    "overdue_review_reminder");
+
+                c.OverdueReviewReminderSentAt = DateTime.UtcNow;
+                await _consultationRepo.UpdateAsync(c);
+                changed++;
+                _logger.LogInformation("[Reminder] OverdueReview re-reminder sent for consultation {Id}.", c.Id);
+            }
+
+            if (changed > 0) await _unitOfWork.SaveChangesAsync();
         }
     }
 }

@@ -11,6 +11,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
     ///   - Customer no-show grace periods expired         → 50/50 split
     ///   - Pending-approval windows (72h) expired         → auto-release escrow to consultant
     ///   - InProgress sessions past duration + 2h grace   → flag as OverdueReview + notify
+    ///   - Soft reminders for stuck-but-not-failed states → nudge notifications only
     ///
     /// Runs every 5 minutes. Register with:
     ///   builder.Services.AddHostedService&lt;ExpirySweepService&gt;();
@@ -53,6 +54,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             await Run(svc.ProcessExpiredCustomerNoShowsAsync, "ProcessExpiredCustomerNoShows");
             await Run(svc.ProcessExpiredApprovalsAsync, "ProcessExpiredApprovals");
             await Run(svc.ProcessOverdueInProgressSessionsAsync, "ProcessOverdueInProgressSessions");
+            await Run(svc.ProcessReminderNotificationsAsync, "ProcessReminderNotifications");
 
             _logger.LogDebug("[ExpirySweep] Sweep cycle complete.");
         }

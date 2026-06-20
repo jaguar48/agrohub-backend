@@ -26,9 +26,19 @@ namespace AgricHub.BLL.Implementations.PaystackService
             _httpClient.DefaultRequestHeaders.Authorization =
                 new AuthenticationHeaderValue("Bearer", _secretKey);
             _httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
-            _httpClient.DefaultRequestHeaders.Add("User-Agent", "AgricHub/1.0 (.NET; compatible)");
+            // Browser-like UA — reduces the chance of triggering Cloudflare's
+            // bot challenge on api.paystack.co compared to a custom UA string.
+            _httpClient.DefaultRequestHeaders.Add("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
             _logger = logger;
         }
+
+        /// <summary>True if Paystack's response is actually a Cloudflare challenge page, not JSON.</summary>
+        private static bool IsCloudflareBlock(string content) =>
+            content.TrimStart().StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase) ||
+            content.TrimStart().StartsWith("<html", StringComparison.OrdinalIgnoreCase) ||
+            content.Contains("Attention Required", StringComparison.OrdinalIgnoreCase) ||
+            content.Contains("cf-error", StringComparison.OrdinalIgnoreCase);
 
         public async Task<(string accessCode, string reference)> InitializeTransactionAsync(
             string email, decimal amount, string callbackUrl)
@@ -55,6 +65,13 @@ namespace AgricHub.BLL.Implementations.PaystackService
                 var response = await _httpClient.PostAsJsonAsync("transaction/initialize", request);
                 var content = await response.Content.ReadAsStringAsync();
 
+                if (IsCloudflareBlock(content))
+                {
+                    _logger.LogError("Paystack InitializeTransactionAsync blocked by Cloudflare.");
+                    throw new InvalidOperationException(
+                        "Payment initialization is temporarily blocked by Paystack's network security. Please try again shortly.");
+                }
+
                 if (!response.IsSuccessStatusCode)
                     throw new InvalidOperationException($"Failed to initialize transaction: {content}");
 
@@ -79,6 +96,19 @@ namespace AgricHub.BLL.Implementations.PaystackService
             {
                 var response = await _httpClient.GetAsync($"transaction/verify/{reference}");
                 var content = await response.Content.ReadAsStringAsync();
+
+                if (IsCloudflareBlock(content))
+                {
+                    _logger.LogError(
+                        "Paystack VerifyTransactionAsync was blocked by Cloudflare for reference {Reference}. " +
+                        "This is a network/IP-reputation issue, not an application bug — the server's outbound " +
+                        "request to api.paystack.co is being challenged before it reaches Paystack's actual API.",
+                        reference);
+                    throw new InvalidOperationException(
+                        "Payment verification is temporarily blocked by Paystack's network security (Cloudflare). " +
+                        "This usually resolves on retry, or may require contacting Paystack support if it persists. " +
+                        "Your payment was NOT lost — try verifying again in a moment.");
+                }
 
                 if (!response.IsSuccessStatusCode)
                     throw new InvalidOperationException($"Failed to verify transaction: {content}");
@@ -114,6 +144,13 @@ namespace AgricHub.BLL.Implementations.PaystackService
                 var response = await _httpClient.PostAsJsonAsync("transfer", request);
                 var content = await response.Content.ReadAsStringAsync();
 
+                if (IsCloudflareBlock(content))
+                {
+                    _logger.LogError("Paystack InitiateConsultantPayoutAsync blocked by Cloudflare for reference {Reference}.", reference);
+                    throw new InvalidOperationException(
+                        "Payout is temporarily blocked by Paystack's network security. Please try again shortly.");
+                }
+
                 if (!response.IsSuccessStatusCode)
                     throw new InvalidOperationException($"Failed to initiate payout: {content}");
 
@@ -147,6 +184,13 @@ namespace AgricHub.BLL.Implementations.PaystackService
                 var response = await _httpClient.PostAsJsonAsync("transferrecipient", request);
                 var content = await response.Content.ReadAsStringAsync();
 
+                if (IsCloudflareBlock(content))
+                {
+                    _logger.LogError("Paystack CreateTransferRecipientAsync blocked by Cloudflare.");
+                    throw new InvalidOperationException(
+                        "Bank recipient creation is temporarily blocked by Paystack's network security. Please try again shortly.");
+                }
+
                 if (!response.IsSuccessStatusCode)
                     throw new InvalidOperationException($"Failed to create transfer recipient: {content}");
 
@@ -174,8 +218,7 @@ namespace AgricHub.BLL.Implementations.PaystackService
                 var content = await response.Content.ReadAsStringAsync();
 
                 // Cloudflare/geo-block guard — HTML response means the API is unreachable
-                if (content.TrimStart().StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase) ||
-                    content.TrimStart().StartsWith("<html", StringComparison.OrdinalIgnoreCase))
+                if (IsCloudflareBlock(content))
                 {
                     _logger.LogWarning("Paystack API returned HTML (Cloudflare block). Using fallback bank list.");
                     return FallbackNigerianBanks();
@@ -214,7 +257,7 @@ namespace AgricHub.BLL.Implementations.PaystackService
                     $"bank/resolve?account_number={accountNumber}&bank_code={bankCode}");
                 var content = await response.Content.ReadAsStringAsync();
 
-                if (content.TrimStart().StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase))
+                if (IsCloudflareBlock(content))
                     throw new InvalidOperationException(
                         "Bank verification is temporarily unavailable. Please enter your account name manually.");
 
