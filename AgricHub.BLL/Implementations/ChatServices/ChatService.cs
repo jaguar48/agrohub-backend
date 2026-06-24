@@ -147,7 +147,7 @@ namespace AgricHub.BLL.Implementations
                              ?? throw new UnauthorizedAccessException("Consultant not found.");
 
             var chatSession = await _chatSessionRepo.GetSingleByAsync(cs => cs.Id == request.ChatSessionId,
-                include: q => q.Include(cs => cs.Service).Include(cs => cs.Consultant))
+                include: q => q.Include(cs => cs.Service).Include(cs => cs.Consultant).Include(cs => cs.Customer))
                 ?? throw new KeyNotFoundException("Chat session not found.");
 
             if (chatSession.ConsultantId != consultant.Id)
@@ -169,8 +169,17 @@ namespace AgricHub.BLL.Implementations
             await _unitOfWork.SaveChangesAsync();
 
             var message = $"Custom offer created for service: {service.ServiceName}. Price: ₦{customOffer.Price}. Description: {customOffer.Description}. Onsite: {customOffer.IncludesOnsiteVisit}. Scheduled: {customOffer.ScheduledAt:yyyy-MM-dd HH:mm}.";
-            var offerData = new { OfferId = customOffer.Id, ServiceId = service.Id, ServiceName = service.ServiceName, customOffer.Price, customOffer.Description, customOffer.IncludesOnsiteVisit, customOffer.ScheduledAt };
+            var offerData = new { OfferId = customOffer.Id, ServiceId = service.Id, ServiceName = service.ServiceName, customOffer.Price, customOffer.Description, customOffer.IncludesOnsiteVisit, customOffer.ScheduledAt, customOffer.DurationMinutes };
             await _sendbirdService.SendAdminMessageAsync(chatSession.SendbirdChannelUrl, message, offerData);
+
+            // ── NEW: notify the customer via the bell, not just the chat admin message ──
+            try
+            {
+                await _sendbirdService.SendNotificationAsync(chatSession.Customer.UserId,
+                    $"💼 {consultant.FirstName} {consultant.LastName} sent you a custom offer for {service.ServiceName} · ₦{customOffer.Price:N2}",
+                    "custom_offer_received");
+            }
+            catch { /* Don't fail the offer creation if the notification fails */ }
 
             return _mapper.Map<CustomOfferResponse>(customOffer);
         }
@@ -270,6 +279,15 @@ namespace AgricHub.BLL.Implementations
                 }
                 catch { /* Don't fail if Sendbird fails */ }
 
+                // ── NEW: notify the consultant via the bell ────────────────────────
+                try
+                {
+                    await _sendbirdService.SendNotificationAsync(customOffer.ChatSession.Consultant.UserId,
+                        $"✅ {customer.FirstName} {customer.LastName} accepted your custom offer for {customOffer.Service.ServiceName} · ₦{customOffer.Price:N2} held in escrow",
+                        "custom_offer_accepted");
+                }
+                catch { /* Don't fail the acceptance if the notification fails */ }
+
                 return _mapper.Map<CustomOfferResponse>(customOffer);
             }
             catch (Exception ex)
@@ -288,6 +306,7 @@ namespace AgricHub.BLL.Implementations
             var customOffer = await _customOfferRepo.GetSingleByAsync(co => co.Id == offerId,
                 include: q => q
                     .Include(co => co.ChatSession).ThenInclude(cs => cs.Customer)
+                    .Include(co => co.ChatSession).ThenInclude(cs => cs.Consultant)
                     .Include(co => co.Service))
                 ?? throw new KeyNotFoundException("Custom offer not found.");
 
@@ -302,6 +321,15 @@ namespace AgricHub.BLL.Implementations
 
             await _sendbirdService.SendAdminMessageAsync(customOffer.ChatSession.SendbirdChannelUrl,
                 $"Custom offer rejected for service: {customOffer.Service.ServiceName}. Reason: {reason}.");
+
+            // ── NEW: notify the consultant via the bell ────────────────────────
+            try
+            {
+                await _sendbirdService.SendNotificationAsync(customOffer.ChatSession.Consultant.UserId,
+                    $"❌ {customer.FirstName} {customer.LastName} declined your custom offer for {customOffer.Service.ServiceName} · Reason: {reason}",
+                    "custom_offer_rejected");
+            }
+            catch { /* Don't fail the rejection if the notification fails */ }
 
             return _mapper.Map<CustomOfferResponse>(customOffer);
         }

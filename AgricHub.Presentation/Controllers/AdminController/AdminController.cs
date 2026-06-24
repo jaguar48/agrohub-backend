@@ -1,5 +1,4 @@
 ﻿// AgricHub.Presentation/Controllers/AdminController/AdminController.cs
-
 using AgricHub.BLL.Interfaces;
 using AgricHub.BLL.Interfaces.IAdminService;
 using AgricHub.Shared.DTO_s;
@@ -19,13 +18,11 @@ namespace AgricHub.Presentation.Controllers.AdminController
         IEmailService emailService) : ControllerBase
     {
         // ── Stats ──────────────────────────────────────────────────────────────
-
         [HttpGet("stats")]
         public async Task<IActionResult> GetStats()
             => Ok(await adminService.GetStatsAsync());
 
         // ── Reviews ────────────────────────────────────────────────────────────
-
         [HttpGet("reviews")]
         public async Task<IActionResult> GetReviews([FromQuery] int? minRating = null)
             => Ok(await adminService.GetReviewsAsync(minRating));
@@ -38,7 +35,6 @@ namespace AgricHub.Presentation.Controllers.AdminController
         }
 
         // ── Verifications ──────────────────────────────────────────────────────
-
         [HttpGet("verifications")]
         public async Task<IActionResult> GetVerifications([FromQuery] bool? verified = null)
             => Ok(await adminService.GetVerificationsAsync(verified));
@@ -51,7 +47,6 @@ namespace AgricHub.Presentation.Controllers.AdminController
         }
 
         // ── Users ──────────────────────────────────────────────────────────────
-
         [HttpGet("users")]
         public async Task<IActionResult> GetUsers(
             [FromQuery] string? role = null,
@@ -61,8 +56,24 @@ namespace AgricHub.Presentation.Controllers.AdminController
             [FromQuery] string? userId = null)
             => Ok(await adminService.GetUsersAsync(role, search, page, pageSize, userId));
 
-        // ── Consultants ────────────────────────────────────────────────────────
+        /// <summary>Suspend a user's account (consultant or customer). Body: { reason }</summary>
+        [HttpPost("users/{userId}/suspend")]
+        public async Task<IActionResult> SuspendUser(string userId, [FromBody] SuspendUserRequest req)
+        {
+            try { await adminService.SuspendUserAsync(userId, req.Reason); return NoContent(); }
+            catch (KeyNotFoundException e) { return NotFound(new { message = e.Message }); }
+            catch (InvalidOperationException e) { return BadRequest(new { message = e.Message }); }
+        }
 
+        /// <summary>Lift a suspension and restore normal account access.</summary>
+        [HttpPost("users/{userId}/reinstate")]
+        public async Task<IActionResult> ReinstateUser(string userId)
+        {
+            try { await adminService.ReinstateUserAsync(userId); return NoContent(); }
+            catch (KeyNotFoundException e) { return NotFound(new { message = e.Message }); }
+        }
+
+        // ── Consultants ────────────────────────────────────────────────────────
         [HttpGet("consultants")]
         public async Task<IActionResult> GetConsultants(
             [FromQuery] bool? verifiedOnly = null,
@@ -72,7 +83,6 @@ namespace AgricHub.Presentation.Controllers.AdminController
             => Ok(await adminService.GetConsultantsAsync(verifiedOnly, search, page, pageSize));
 
         // ── Categories ─────────────────────────────────────────────────────────
-
         [HttpGet("categories")]
         public async Task<IActionResult> GetCategories()
             => Ok(await adminService.GetCategoriesAsync());
@@ -92,7 +102,6 @@ namespace AgricHub.Presentation.Controllers.AdminController
         }
 
         // ── Disputes (consultation completion disputes) ───────────────────────
-
         /// <summary>Consultation disputes raised by customers. statusFilter: open | ResolvedReleased | ResolvedRefunded | all</summary>
         [HttpGet("disputes")]
         public async Task<IActionResult> GetDisputes([FromQuery] string? status = null)
@@ -108,7 +117,6 @@ namespace AgricHub.Presentation.Controllers.AdminController
         }
 
         // ── Financials ─────────────────────────────────────────────────────────
-
         [HttpGet("financials/overview")]
         public async Task<IActionResult> GetFinancialOverview()
         {
@@ -150,7 +158,6 @@ namespace AgricHub.Presentation.Controllers.AdminController
         }
 
         // ── Platform Settings ──────────────────────────────────────────────────
-
         [HttpGet("settings")]
         public async Task<IActionResult> GetSettings()
         {

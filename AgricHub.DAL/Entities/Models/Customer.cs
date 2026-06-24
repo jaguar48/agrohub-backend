@@ -13,6 +13,10 @@ namespace AgricHub.DAL.Entities.Models
         public string? CountryId { get; set; }
         public string? StateId { get; set; }
         public string? Address { get; set; }
+        public bool IsSuspended { get; set; } = false;
+        public DateTime? SuspendedAt { get; set; }
+        public string? SuspensionReason { get; set; }
+
         public bool IsVerified { get; set; } = false;
         public int? NoShowCount { get; set; } = 0;
         public string? SendbirdChannelUrl { get; set; }

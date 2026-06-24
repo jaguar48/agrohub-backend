@@ -44,6 +44,21 @@ namespace AgricHub.BLL.Implementations.UserServices
             _walletRepo     = _unitOfWork.GetRepository<Wallet>();
         }
 
+        /// <summary>Throws UnauthorizedAccessException if the user's Consultant or Customer
+        /// record has IsSuspended = true. Used to block login for suspended accounts.</summary>
+        private async Task EnsureNotSuspendedAsync(string userId)
+        {
+            var consultant = await _consultantRepo.GetSingleByAsync(c => c.UserId == userId);
+            if (consultant != null && consultant.IsSuspended)
+                throw new UnauthorizedAccessException(
+                    $"This account has been suspended. Reason: {consultant.SuspensionReason ?? "Contact support for details."}");
+
+            var customer = await _customerRepo.GetSingleByAsync(c => c.UserId == userId);
+            if (customer != null && customer.IsSuspended)
+                throw new UnauthorizedAccessException(
+                    $"This account has been suspended. Reason: {customer.SuspensionReason ?? "Contact support for details."}");
+        }
+
         public async Task<bool> SendVerificationEmail(string email, string verificationToken)
         {
             var apiKey = "";
@@ -97,6 +112,16 @@ namespace AgricHub.BLL.Implementations.UserServices
             var result = _user != null && await _userManager.CheckPasswordAsync(_user, response.Password);
             if (!result)
                 return new ServiceResponse<string> { Success = false, Message = "Login failed. Wrong username or password." };
+
+            // ── Suspension check: block suspended accounts from logging in ──────────
+            try
+            {
+                await EnsureNotSuspendedAsync(_user.Id);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return new ServiceResponse<string> { Success = false, Message = ex.Message };
+            }
 
             var roles = await _userManager.GetRolesAsync(_user);
             var role = roles.FirstOrDefault() ?? "Customer";
@@ -162,6 +187,10 @@ namespace AgricHub.BLL.Implementations.UserServices
             if (user != null)
             {
                 _user = user;
+
+                // ── Suspension check: block suspended accounts via Google login too ──
+                await EnsureNotSuspendedAsync(user.Id);
+
                 var token = await GenerateToken();
                 var roles = await _userManager.GetRolesAsync(user);
                 var userType = roles.FirstOrDefault() ?? "Customer";

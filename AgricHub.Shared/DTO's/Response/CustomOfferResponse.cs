@@ -6,7 +6,6 @@ using System.Threading.Tasks;
 
 namespace AgricHub.Shared.DTO_s.Response
 {
-  
     public class CustomOfferResponse
     {
         public Guid Id { get; set; }
@@ -19,5 +18,11 @@ namespace AgricHub.Shared.DTO_s.Response
         public string Status { get; set; }
         public DateTime CreatedAt { get; set; }
         public DateTime? AcceptedAt { get; set; }
+
+        // ── ADDED: these existed on the CustomOffer entity but were never
+        // exposed on the response, so the frontend had no way to ever show
+        // duration or scheduled time for a custom offer. ───────────────────
+        public int DurationMinutes { get; set; }
+        public DateTime? ScheduledAt { get; set; }
     }
 }

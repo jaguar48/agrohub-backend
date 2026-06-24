@@ -14,6 +14,10 @@ namespace AgricHub.DAL.Entities.Models
         public string? Bio { get; set; }
         public int? YearsOfExperience { get; set; }
         public decimal? HourlyRate { get; set; }
+        public bool IsSuspended { get; set; } = false;
+        public DateTime? SuspendedAt { get; set; }
+        public string? SuspensionReason { get; set; }
+
         public string? Address { get; set; }
         public string? CountryId { get; set; }
         public string? StateId { get; set; }

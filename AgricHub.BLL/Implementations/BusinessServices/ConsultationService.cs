@@ -126,8 +126,17 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             var customer = await _customerRepo.GetSingleByAsync(c => c.UserId == userId)
                            ?? throw new UnauthorizedAccessException("Customer not found.");
 
+            // ── Suspension check: blocked customers cannot create new bookings ────
+            if (customer.IsSuspended)
+                throw new InvalidOperationException(
+                    $"Your account is suspended and cannot make new bookings. Reason: {customer.SuspensionReason ?? "Contact support."}");
+
             var consultant = await _consultantRepo.GetSingleByAsync(c => c.UserId == dto.ConsultantUserId)
                              ?? throw new KeyNotFoundException("Consultant not found.");
+
+            // ── Suspension check: cannot book a suspended consultant ──────────────
+            if (consultant.IsSuspended)
+                throw new InvalidOperationException("This consultant is currently unavailable for new bookings.");
 
             var service = await _servicesRepo.GetSingleByAsync(s => s.Id == dto.ServiceId,
                 include: q => q.Include(s => s.Business).Include(s => s.Packages))
@@ -269,6 +278,13 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 ?? throw new KeyNotFoundException("Consultation not found.");
 
             await EnsureConsultantOwnershipAsync(consultation, userId);
+
+            // ── Suspension check: suspended consultants cannot approve bookings ───
+            var approvingConsultant = await _consultantRepo.GetSingleByAsync(c => c.UserId == userId);
+            if (approvingConsultant?.IsSuspended == true)
+                throw new InvalidOperationException(
+                    $"Your account is suspended and cannot approve bookings. Reason: {approvingConsultant.SuspensionReason ?? "Contact support."}");
+
             if (consultation.Status != "Pending")
                 throw new InvalidOperationException("Only pending consultations can be approved.");
 
@@ -1124,7 +1140,6 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             consultation.NoShowProcessed         = false;
             consultation.RescheduleRequestedAt   = null;
             consultation.RescheduleRequestReason = null;
-            // Reset the start-reminder flag — new schedule means a new potential reminder window
             consultation.ApprovedStartReminderSentAt = null;
             await _consultationRepo.UpdateAsync(consultation);
             await _unitOfWork.SaveChangesAsync();

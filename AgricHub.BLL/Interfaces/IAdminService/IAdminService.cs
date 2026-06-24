@@ -13,6 +13,9 @@ namespace AgricHub.BLL.Interfaces.IAdminService
         Task<AdminStatsDto> GetStatsAsync();
         // Reviews (moderation)
         Task<IReadOnlyList<AdminReviewDto>> GetReviewsAsync(int? minRating = null);
+        Task SuspendUserAsync(string userId, string reason);
+        Task ReinstateUserAsync(string userId);
+
         Task DeleteReviewAsync(int reviewId);
         // Verifications
         Task<IReadOnlyList<VerificationDto>> GetVerificationsAsync(bool? verified = null);

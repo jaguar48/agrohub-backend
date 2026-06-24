@@ -245,6 +245,8 @@ namespace AgricHub.BLL.Implementations.AdminService
                 int completedConsultations = 0;
                 int noShowCount = 0;
                 DateTime? createdAt = null;
+                bool isSuspended = false;
+                string? suspensionReason = null;
 
                 if (roles.Contains("Customer"))
                 {
@@ -260,6 +262,8 @@ namespace AgricHub.BLL.Implementations.AdminService
                         completedConsultations = consultations.Count(c => c.Status == "Completed");
                         noShowCount            = customer.NoShowCount ?? 0;
                         createdAt              = customer.CreatedAt;
+                        isSuspended             = customer.IsSuspended;
+                        suspensionReason        = customer.SuspensionReason;
                     }
                 }
                 else if (roles.Contains("Consultant"))
@@ -276,13 +280,16 @@ namespace AgricHub.BLL.Implementations.AdminService
                         completedConsultations = consultations.Count(c => c.Status == "Completed");
                         noShowCount            = consultant.NoShowCount ?? 0;
                         createdAt              = consultant.CreatedAt;
+                        isSuspended             = consultant.IsSuspended;
+                        suspensionReason        = consultant.SuspensionReason;
                     }
                 }
 
                 dtos.Add(new AdminUserDto(
                     user.Id, user.FirstName, user.LastName,
                     user.Email ?? "", user.CountryId, roles,
-                    walletBalance, totalConsultations, activeConsultations, completedConsultations, noShowCount, createdAt));
+                    walletBalance, totalConsultations, activeConsultations, completedConsultations, noShowCount, createdAt,
+                    isSuspended, suspensionReason));
             }
 
             var customers = (await _userManager.GetUsersInRoleAsync("Customer")).Count;
@@ -290,6 +297,99 @@ namespace AgricHub.BLL.Implementations.AdminService
             var admins = (await _userManager.GetUsersInRoleAsync("Admin")).Count;
 
             return new AdminUserPagedResult(dtos, total, page, pageSize, customers, consultants, admins);
+        }
+
+        // ── Suspend / Reinstate ──────────────────────────────────────
+        // Works for either role — looks up whichever record (Consultant or
+        // Customer) is linked to this ApplicationUser.Id and flips the flag.
+
+        public async Task SuspendUserAsync(string userId, string reason)
+        {
+            if (string.IsNullOrWhiteSpace(reason))
+                throw new InvalidOperationException("A reason is required to suspend an account.");
+
+            var consultant = await _consultantRepo.GetSingleByAsync(c => c.UserId == userId);
+            if (consultant != null)
+            {
+                consultant.IsSuspended      = true;
+                consultant.SuspendedAt      = DateTime.UtcNow;
+                consultant.SuspensionReason = reason.Trim();
+                await _consultantRepo.UpdateAsync(consultant);
+                await _unitOfWork.SaveChangesAsync();
+
+                try
+                {
+                    await _sendbirdService.SendNotificationAsync(userId,
+                        $"🚫 Your account has been suspended. Reason: {reason.Trim()} · Contact support if you believe this is a mistake.",
+                        "account_suspended");
+                }
+                catch { }
+                return;
+            }
+
+            var customer = await _customerRepo.GetSingleByAsync(c => c.UserId == userId);
+            if (customer != null)
+            {
+                customer.IsSuspended      = true;
+                customer.SuspendedAt      = DateTime.UtcNow;
+                customer.SuspensionReason = reason.Trim();
+                await _customerRepo.UpdateAsync(customer);
+                await _unitOfWork.SaveChangesAsync();
+
+                try
+                {
+                    await _sendbirdService.SendNotificationAsync(userId,
+                        $"🚫 Your account has been suspended. Reason: {reason.Trim()} · Contact support if you believe this is a mistake.",
+                        "account_suspended");
+                }
+                catch { }
+                return;
+            }
+
+            throw new KeyNotFoundException($"No Consultant or Customer record found for user {userId}.");
+        }
+
+        public async Task ReinstateUserAsync(string userId)
+        {
+            var consultant = await _consultantRepo.GetSingleByAsync(c => c.UserId == userId);
+            if (consultant != null)
+            {
+                consultant.IsSuspended      = false;
+                consultant.SuspendedAt      = null;
+                consultant.SuspensionReason = null;
+                await _consultantRepo.UpdateAsync(consultant);
+                await _unitOfWork.SaveChangesAsync();
+
+                try
+                {
+                    await _sendbirdService.SendNotificationAsync(userId,
+                        "✅ Your account suspension has been lifted. You can now use AgricHub normally again.",
+                        "account_reinstated");
+                }
+                catch { }
+                return;
+            }
+
+            var customer = await _customerRepo.GetSingleByAsync(c => c.UserId == userId);
+            if (customer != null)
+            {
+                customer.IsSuspended      = false;
+                customer.SuspendedAt      = null;
+                customer.SuspensionReason = null;
+                await _customerRepo.UpdateAsync(customer);
+                await _unitOfWork.SaveChangesAsync();
+
+                try
+                {
+                    await _sendbirdService.SendNotificationAsync(userId,
+                        "✅ Your account suspension has been lifted. You can now use AgricHub normally again.",
+                        "account_reinstated");
+                }
+                catch { }
+                return;
+            }
+
+            throw new KeyNotFoundException($"No Consultant or Customer record found for user {userId}.");
         }
 
         // ── Consultants ───────────────────────────────────────────

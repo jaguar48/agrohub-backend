@@ -14,5 +14,6 @@ namespace AgricHub.BLL.Interfaces.IChatServices
             /// The API key never leaves the server.
             /// </summary>
             Task<string> CreateRoomAsync(string roomName, int expirySeconds = 7200);
+       Task<string> CreateMeetingTokenAsync(string roomName, bool isOwner = false, string? userName = null, int expirySeconds = 7200);
         }
     }

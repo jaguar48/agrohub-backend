@@ -82,19 +82,22 @@ namespace AgricHub.Shared.DTO_s
 
     // ── Users ─────────────────────────────────────────────────────
     public record AdminUserDto(
-       string Id,
-       string FirstName,
-       string LastName,
-       string Email,
-       string? CountryId,
-       IList<string> Roles,
-       decimal WalletBalance,
-       int TotalConsultations,
-       int ActiveConsultations,
-       int CompletedConsultations,
-       int NoShowCount,
-       DateTime? CreatedAt
-   );
+     string Id,
+     string FirstName,
+     string LastName,
+     string Email,
+     string? CountryId,
+     IList<string> Roles,
+     decimal WalletBalance,
+     int TotalConsultations,
+     int ActiveConsultations,
+     int CompletedConsultations,
+     int NoShowCount,
+     DateTime? CreatedAt,
+     bool IsSuspended,
+     string? SuspensionReason
+  );
+
 
 
 
@@ -196,6 +199,8 @@ namespace AgricHub.Shared.DTO_s
         int TotalConsultants,
         int TotalAdmins
     );
+
+    public record SuspendUserRequest(string Reason);
 
     // ── Consultants ───────────────────────────────────────────
 

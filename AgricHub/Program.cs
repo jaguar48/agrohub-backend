@@ -103,6 +103,15 @@ using (var scope = app.Services.CreateScope())
 // ── Middleware ─────────────────────────────────────────────────────────────────
 app.ConfigureExceptionHandler();
 app.UseCors("Angular");
+
+// ── NEW: Permissions-Policy header required by Chrome 94+ for screen sharing
+// (display-capture) to work inside the Daily.co video call iframe. Placed
+// early, before UseStaticFiles, so it applies to every response — including
+// the Angular index.html once this backend serves the built frontend in
+// production. Has no effect while Angular runs separately via `ng serve`
+// during local development — see chat history for why. ─────────────────────
+app.UseScreenSharePermissions();
+
 app.UseStaticFiles();
 app.UseStaticFiles(new StaticFileOptions
 {
