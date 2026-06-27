@@ -1,5 +1,4 @@
 ﻿// AgricHub.BLL/Implementations/ChatServices/SendbirdService.cs
-
 using AgricHub.BLL.Interfaces.ChatServices;
 using AgricHub.DAL.Entities.Models;
 using AgricHub.Shared.DTO_s.Request;
@@ -36,8 +35,7 @@ namespace AgricHub.BLL.Implementations.ChatServices
             _httpClient          = new HttpClient();
             _sendbirdAppId       = configuration["Sendbird:AppId"];
             _sendbirdApiToken    = configuration["Sendbird:ApiToken"];
-
-            Console.WriteLine($"[Sendbird] Service initialized — AppId={(_sendbirdAppId ?? "NULL")}, ApiToken={(string.IsNullOrEmpty(_sendbirdApiToken) ? "MISSING" : "set (" + _sendbirdApiToken.Length + " chars)")}");
+            Console.WriteLine($"[Sendbird] Service initialized - AppId={(_sendbirdAppId ?? "NULL")}, ApiToken={(string.IsNullOrEmpty(_sendbirdApiToken) ? "MISSING" : "set (" + _sendbirdApiToken.Length + " chars)")}");
         }
 
         // ── User management ────────────────────────────────────────────────────
@@ -64,10 +62,8 @@ namespace AgricHub.BLL.Implementations.ChatServices
                 }), Encoding.UTF8, "application/json")
             };
             request.Headers.Add("Api-Token", _sendbirdApiToken);
-
             var response = await _httpClient.SendAsync(request);
             var content = await response.Content.ReadAsStringAsync();
-
             if (!response.IsSuccessStatusCode)
             {
                 if (content.Contains("user_id already exists"))
@@ -80,7 +76,6 @@ namespace AgricHub.BLL.Implementations.ChatServices
                 }
                 throw new Exception($"Failed to create Sendbird user: {content}");
             }
-
             return content;
         }
 
@@ -89,11 +84,9 @@ namespace AgricHub.BLL.Implementations.ChatServices
             var getReq = new HttpRequestMessage(HttpMethod.Get,
                 $"https://api-{_sendbirdAppId}.sendbird.com/v3/users/{userId}");
             getReq.Headers.Add("Api-Token", _sendbirdApiToken);
-
             var getRes = await _httpClient.SendAsync(getReq);
             if (getRes.IsSuccessStatusCode)
                 return await getRes.Content.ReadAsStringAsync();
-
             return await CreateSendbirdUserAsync(userId, nickname);
         }
 
@@ -115,13 +108,10 @@ namespace AgricHub.BLL.Implementations.ChatServices
                 }), Encoding.UTF8, "application/json")
             };
             request.Headers.Add("Api-Token", _sendbirdApiToken);
-
             var response = await _httpClient.SendAsync(request);
             var result = await response.Content.ReadAsStringAsync();
-
             if (!response.IsSuccessStatusCode)
                 throw new Exception($"Sendbird channel creation failed: {result}");
-
             return JsonConvert.DeserializeObject<SendbirdChannel>(result)!.channel_url;
         }
 
@@ -130,13 +120,10 @@ namespace AgricHub.BLL.Implementations.ChatServices
             var request = new HttpRequestMessage(HttpMethod.Get,
                 $"https://api-{_sendbirdAppId}.sendbird.com/v3/group_channels?user_id={userId1}&show_member=true");
             request.Headers.Add("Api-Token", _sendbirdApiToken);
-
             var response = await _httpClient.SendAsync(request);
             var content = await response.Content.ReadAsStringAsync();
-
             if (!response.IsSuccessStatusCode)
                 throw new Exception($"Failed to fetch channels: {content}");
-
             var channelResponse = JsonConvert.DeserializeObject<SendbirdChannelResponse>(content);
             foreach (var channel in channelResponse!.channels)
             {
@@ -144,7 +131,6 @@ namespace AgricHub.BLL.Implementations.ChatServices
                 if (memberIds.Contains(userId1) && memberIds.Contains(userId2) && channel.is_distinct)
                     return channel.channel_url;
             }
-
             return null;
         }
 
@@ -153,7 +139,6 @@ namespace AgricHub.BLL.Implementations.ChatServices
         public async Task<string> CreateNotificationChannelAsync(string userId, string nickname)
         {
             await EnsureSendbirdUserAsync(userId, nickname);
-
             var channelUrl = $"notif-{userId}";
             var request = new HttpRequestMessage(HttpMethod.Post,
                 $"https://api-{_sendbirdAppId}.sendbird.com/v3/group_channels")
@@ -169,33 +154,23 @@ namespace AgricHub.BLL.Implementations.ChatServices
                 }), Encoding.UTF8, "application/json")
             };
             request.Headers.Add("Api-Token", _sendbirdApiToken);
-
             var response = await _httpClient.SendAsync(request);
             var content = await response.Content.ReadAsStringAsync();
-
             if (!response.IsSuccessStatusCode)
             {
                 Console.WriteLine($"[Sendbird] CreateNotificationChannel response ({(int)response.StatusCode}): {content}");
-
-                // Channel already existing is NOT an error — expected for any user
-                // who has received a notification before. Sendbird's actual message
-                // is `"channel_url" violates unique constraint.` (code 400202), which
-                // does NOT contain "already", so we check for both.
                 var channelAlreadyExists =
                     content.Contains("already", StringComparison.OrdinalIgnoreCase) ||
                     content.Contains("unique constraint", StringComparison.OrdinalIgnoreCase) ||
                     content.Contains("400202");
-
                 if (!channelAlreadyExists)
                     throw new Exception($"Failed to create notification channel: {content}");
-
                 Console.WriteLine($"[Sendbird] Notification channel already exists (expected): {channelUrl}");
             }
             else
             {
                 Console.WriteLine($"[Sendbird] Created notification channel: {channelUrl}");
             }
-
             return channelUrl;
         }
 
@@ -203,20 +178,15 @@ namespace AgricHub.BLL.Implementations.ChatServices
         {
             Console.WriteLine($"[Sendbird] >>> SendNotificationAsync CALLED — userId={userId}, type={type}");
 
-            // ── FIX: Validate inputs before attempting anything ────────────────
-            // Sending to a null/empty userId causes a misleading 404 from Sendbird
-            // that looks like a channel error. Catch it here with a clear message.
             if (string.IsNullOrWhiteSpace(userId))
             {
-                Console.WriteLine($"[Sendbird] ⚠️  SendNotificationAsync called with null/empty userId — skipping (type={type}, message=\"{message}\")");
+                Console.WriteLine($"[Sendbird] ⚠️  SendNotificationAsync called with null/empty userId — skipping (type={type})");
                 return;
             }
 
             try
             {
-                // Create channel on-demand for existing users who registered before this feature
                 var channelUrl = await CreateNotificationChannelAsync(userId, userId);
-
                 var payload = JsonConvert.SerializeObject(new
                 {
                     message_type = "ADMM",
@@ -230,46 +200,57 @@ namespace AgricHub.BLL.Implementations.ChatServices
                     })
                 });
 
-                // ── FIX: Retry once on transient 5xx errors ───────────────────
-                // Sendbird occasionally returns 503 under load. A single retry
-                // catches the vast majority of transient failures without
-                // introducing meaningful latency for the business action.
                 HttpResponseMessage response = null!;
                 string content = string.Empty;
 
                 for (int attempt = 1; attempt <= 2; attempt++)
                 {
-                    var request = new HttpRequestMessage(HttpMethod.Post,
-                        $"https://api-{_sendbirdAppId}.sendbird.com/v3/group_channels/{channelUrl}/messages")
+                    try
                     {
-                        Content = new StringContent(payload, Encoding.UTF8, "application/json")
-                    };
-                    request.Headers.Add("Api-Token", _sendbirdApiToken);
+                        // HttpRequestMessage can only be sent once — create fresh each attempt
+                        var request = new HttpRequestMessage(HttpMethod.Post,
+                            $"https://api-{_sendbirdAppId}.sendbird.com/v3/group_channels/{channelUrl}/messages")
+                        {
+                            Content = new StringContent(payload, Encoding.UTF8, "application/json")
+                        };
+                        request.Headers.Add("Api-Token", _sendbirdApiToken);
 
-                    response = await _httpClient.SendAsync(request);
-                    content  = await response.Content.ReadAsStringAsync();
+                        response = await _httpClient.SendAsync(request);
+                        content  = await response.Content.ReadAsStringAsync();
 
-                    if (response.IsSuccessStatusCode)
-                        break;
+                        if (response.IsSuccessStatusCode) break;
 
-                    var statusCode = (int)response.StatusCode;
-                    Console.WriteLine($"[Sendbird] ❌ Notification SEND attempt {attempt}/2 FAILED ({statusCode}) for {userId}: {content}");
+                        var statusCode = (int)response.StatusCode;
+                        Console.WriteLine($"[Sendbird] ❌ Notification SEND attempt {attempt}/2 FAILED ({statusCode}) for {userId}: {content}");
 
-                    // Only retry on server-side errors — 4xx means bad request, no point retrying
-                    if (statusCode < 500 || attempt == 2) break;
-
-                    await Task.Delay(500); // brief pause before retry
+                        // Only retry on server-side errors — 4xx means bad request, no point retrying
+                        if (statusCode < 500 || attempt == 2) break;
+                        await Task.Delay(500);
+                    }
+                    catch (HttpRequestException ex) when (
+                        attempt < 2 && (
+                            ex.InnerException?.Message?.Contains("forcibly closed") == true ||
+                            ex.InnerException?.Message?.Contains("connection was reset") == true ||
+                            ex.InnerException?.Message?.Contains("transport connection") == true))
+                    {
+                        // ── FIXED: This is what was previously escaping the retry loop ─────
+                        // The existing retry only handled HTTP status codes. Connection-reset
+                        // exceptions (thrown before a response is received) bypassed the loop
+                        // entirely and landed in the outer catch, making it look like there
+                        // was no retry at all. Now they're caught inside the loop and retried.
+                        Console.WriteLine($"[Sendbird] ⚠️  Connection reset on attempt {attempt}/2, retrying after 300ms…");
+                        await Task.Delay(300);
+                        // Continue to next iteration — a fresh HttpRequestMessage is created
+                    }
                 }
 
-                if (!response.IsSuccessStatusCode)
+                if (response is null || !response.IsSuccessStatusCode)
                     Console.WriteLine($"[Sendbird] ❌ Notification SEND FAILED (all attempts) for userId={userId}, type={type}: {content}");
                 else
                     Console.WriteLine($"[Sendbird] ✅ Notification SENT to {channelUrl}: \"{message}\"");
             }
             catch (Exception ex)
             {
-                // Never crash a business action because of a notification failure.
-                // Log enough detail to diagnose the root cause from server logs.
                 Console.WriteLine($"[Sendbird] ❌ Notification ERROR for userId={userId}, type={type}: {ex.GetType().Name} — {ex.Message}");
                 if (ex.InnerException != null)
                     Console.WriteLine($"[Sendbird]    Inner: {ex.InnerException.Message}");
@@ -283,7 +264,6 @@ namespace AgricHub.BLL.Implementations.ChatServices
         {
             if (string.IsNullOrWhiteSpace(message))
                 throw new ArgumentException("Message cannot be null or empty", nameof(message));
-
             var request = new HttpRequestMessage(HttpMethod.Post,
                 $"https://api-{_sendbirdAppId}.sendbird.com/v3/group_channels/{channelUrl}/messages")
             {
@@ -297,10 +277,8 @@ namespace AgricHub.BLL.Implementations.ChatServices
                 }), Encoding.UTF8, "application/json")
             };
             request.Headers.Add("Api-Token", _sendbirdApiToken);
-
             var response = await _httpClient.SendAsync(request);
             var content = await response.Content.ReadAsStringAsync();
-
             if (!response.IsSuccessStatusCode)
                 throw new Exception($"Failed to send message: {content}");
         }
@@ -318,54 +296,39 @@ namespace AgricHub.BLL.Implementations.ChatServices
                 }), Encoding.UTF8, "application/json")
             };
             request.Headers.Add("Api-Token", _sendbirdApiToken);
-
             var response = await _httpClient.SendAsync(request);
             var content = await response.Content.ReadAsStringAsync();
-
             if (!response.IsSuccessStatusCode)
                 throw new Exception($"Failed to send admin message: {content}");
         }
 
-        // ── FIXED: Sendbird's "List messages" endpoint requires a message_ts
-        // anchor + prev_limit/next_limit — it does NOT accept a plain "limit"
-        // param. The old query (?message_type=ADMM&limit=30&reverse=true) was
-        // being rejected/misread by Sendbird, so the bell always looked empty
-        // even after a notification was sent successfully. ────────────────────
+        // ── Notification history ───────────────────────────────────────────────
+
         public async Task<List<NotificationHistoryItem>> GetNotificationHistoryAsync(string userId, int limit = 30)
         {
             var channelUrl = $"notif-{userId}";
             var nowTs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var url = $"https://api-{_sendbirdAppId}.sendbird.com/v3/group_channels/{channelUrl}/messages" +
                       $"?message_ts={nowTs}&prev_limit={limit}&next_limit=0&include=true&reverse=true&message_type=ADMM";
-
             var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.Add("Api-Token", _sendbirdApiToken);
-
             var response = await _httpClient.SendAsync(request);
             var content = await response.Content.ReadAsStringAsync();
-
             if (!response.IsSuccessStatusCode)
             {
                 Console.WriteLine($"[Sendbird] GetNotificationHistory response ({(int)response.StatusCode}) for {channelUrl}: {content}");
-
-                // Channel doesn't exist yet (no notifications ever sent) — return empty list
                 if (response.StatusCode == System.Net.HttpStatusCode.NotFound ||
                     response.StatusCode == System.Net.HttpStatusCode.BadRequest)
                     return new List<NotificationHistoryItem>();
-
                 throw new Exception($"Failed to fetch notification history: {content}");
             }
-
             Console.WriteLine($"[Sendbird] GetNotificationHistory OK for {channelUrl} — raw response: {content}");
-
             var data = JsonConvert.DeserializeObject<dynamic>(content);
             var result = new List<NotificationHistoryItem>();
-
             foreach (var m in data!.messages)
             {
                 dynamic parsed = new { type = "info" };
                 try { parsed = JsonConvert.DeserializeObject<dynamic>((string)(m.data ?? "{}")); } catch { }
-
                 result.Add(new NotificationHistoryItem
                 {
                     Message   = (string)(m.message ?? ""),
@@ -373,11 +336,8 @@ namespace AgricHub.BLL.Implementations.ChatServices
                     CreatedAt = (long)(m.created_at ?? 0),
                 });
             }
-
             Console.WriteLine($"[Sendbird] GetNotificationHistory parsed {result.Count} item(s) for {channelUrl}.");
-
             return result;
         }
-
     }
 }

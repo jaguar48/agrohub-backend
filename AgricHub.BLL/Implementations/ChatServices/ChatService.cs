@@ -63,7 +63,6 @@ namespace AgricHub.BLL.Implementations
             var consultant = await _consultantRepo.GetSingleByAsync(c => c.UserId == request.ConsultantUserId)
                              ?? throw new KeyNotFoundException("Consultant not found.");
 
-            // Service + business validation — only if ServiceId was provided
             Service service = null;
             Business business = null;
 
@@ -81,7 +80,6 @@ namespace AgricHub.BLL.Implementations
                     throw new UnauthorizedAccessException("This service does not belong to the specified consultant.");
             }
 
-            // Look for existing chat session (with or without service)
             var existingChat = await _chatSessionRepo.GetSingleByAsync(cs =>
                 cs.CustomerId   == customer.Id &&
                 cs.ConsultantId == consultant.Id &&
@@ -116,7 +114,6 @@ namespace AgricHub.BLL.Implementations
                 chatSessionId = chatSession.Id;
             }
 
-            // Send admin message (skip if no service)
             try
             {
                 var msg = service != null
@@ -161,6 +158,16 @@ namespace AgricHub.BLL.Implementations
                 b => b.Id == service.BusinessId && b.ConsultantId == consultant.Id)
                 ?? throw new UnauthorizedAccessException("This service does not belong to the specified consultant.");
 
+            // ── PATCH: Validate scheduled date is in the future ─────────────────
+            if (request.ScheduledAt <= DateTime.UtcNow)
+                throw new InvalidOperationException(
+                    "The scheduled date must be in the future. Please choose a date and time that hasn't passed yet.");
+
+            if (request.ScheduledAt < DateTime.UtcNow.AddMinutes(30))
+                throw new InvalidOperationException(
+                    "Please schedule the offer at least 30 minutes from now so the customer has time to review it.");
+            // ────────────────────────────────────────────────────────────────────
+
             var customOffer = _mapper.Map<CustomOffer>(request);
             customOffer.Status    = "Pending";
             customOffer.CreatedAt = DateTime.UtcNow;
@@ -172,7 +179,6 @@ namespace AgricHub.BLL.Implementations
             var offerData = new { OfferId = customOffer.Id, ServiceId = service.Id, ServiceName = service.ServiceName, customOffer.Price, customOffer.Description, customOffer.IncludesOnsiteVisit, customOffer.ScheduledAt, customOffer.DurationMinutes };
             await _sendbirdService.SendAdminMessageAsync(chatSession.SendbirdChannelUrl, message, offerData);
 
-            // ── NEW: notify the customer via the bell, not just the chat admin message ──
             try
             {
                 await _sendbirdService.SendNotificationAsync(chatSession.Customer.UserId,
@@ -277,16 +283,15 @@ namespace AgricHub.BLL.Implementations
                         $"Price: ₦{customOffer.Price:N2} (held in escrow). " +
                         $"Scheduled: {customOffer.ScheduledAt:yyyy-MM-dd HH:mm}.");
                 }
-                catch { /* Don't fail if Sendbird fails */ }
+                catch { }
 
-                // ── NEW: notify the consultant via the bell ────────────────────────
                 try
                 {
                     await _sendbirdService.SendNotificationAsync(customOffer.ChatSession.Consultant.UserId,
                         $"✅ {customer.FirstName} {customer.LastName} accepted your custom offer for {customOffer.Service.ServiceName} · ₦{customOffer.Price:N2} held in escrow",
                         "custom_offer_accepted");
                 }
-                catch { /* Don't fail the acceptance if the notification fails */ }
+                catch { }
 
                 return _mapper.Map<CustomOfferResponse>(customOffer);
             }
@@ -322,14 +327,13 @@ namespace AgricHub.BLL.Implementations
             await _sendbirdService.SendAdminMessageAsync(customOffer.ChatSession.SendbirdChannelUrl,
                 $"Custom offer rejected for service: {customOffer.Service.ServiceName}. Reason: {reason}.");
 
-            // ── NEW: notify the consultant via the bell ────────────────────────
             try
             {
                 await _sendbirdService.SendNotificationAsync(customOffer.ChatSession.Consultant.UserId,
                     $"❌ {customer.FirstName} {customer.LastName} declined your custom offer for {customOffer.Service.ServiceName} · Reason: {reason}",
                     "custom_offer_rejected");
             }
-            catch { /* Don't fail the rejection if the notification fails */ }
+            catch { }
 
             return _mapper.Map<CustomOfferResponse>(customOffer);
         }
