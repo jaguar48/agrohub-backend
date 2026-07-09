@@ -119,7 +119,18 @@ namespace AgricHub.API.Extension
 
             // ── Chat ───────────────────────────────────────────────────────────
             services.AddScoped<IChatService, ChatService>();
-            services.AddScoped<ISendbirdService, SendbirdService>();
+
+            // ── Sendbird — TYPED HttpClient (replaces AddScoped<ISendbirdService>)
+            // Using IHttpClientFactory prevents socket exhaustion caused by
+            // new HttpClient() per request (which was causing the 100-second hangs
+            // on GetNotificationHistoryAsync under concurrent load).
+            services.AddHttpClient<ISendbirdService, SendbirdService>(client =>
+            {
+                // Short global timeout — individual calls can be cancelled sooner
+                // via CancellationToken (e.g. 8s in NotificationsController).
+                client.Timeout = TimeSpan.FromSeconds(15);
+            })
+            .SetHandlerLifetime(TimeSpan.FromMinutes(5));   // recycle connections every 5min
 
             // ── Video (Daily.co) ───────────────────────────────────────────────
             services.AddHttpClient();

@@ -2,11 +2,8 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Text;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 
@@ -16,16 +13,24 @@ namespace AgricHub.BLL.Implementations.ChatServices
     {
         private readonly HttpClient _http;
         private readonly ILogger<DailyService> _logger;
-        private readonly string _apiKey;
 
         public DailyService(IHttpClientFactory httpClientFactory, IConfiguration config, ILogger<DailyService> logger)
         {
-            _http   = httpClientFactory.CreateClient();
             _logger = logger;
-            _apiKey = config["Daily:ApiKey"]
-                      ?? throw new InvalidOperationException("Daily:ApiKey is not configured.");
-            _http.BaseAddress = new Uri("https://api.daily.co/v1/");
-            _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+
+            var apiKey = config["Daily:ApiKey"]
+                ?? throw new InvalidOperationException("Daily:ApiKey is not configured.");
+
+            // FIX 1: Use the named "daily" client registered in Program.cs so the
+            // 15-second timeout and BaseAddress are already set — don't mutate here.
+            // If you haven't added the named registration yet, add this to Program.cs:
+            //   builder.Services.AddHttpClient("daily", c => {
+            //       c.BaseAddress = new Uri("https://api.daily.co/v1/");
+            //       c.Timeout = TimeSpan.FromSeconds(15);
+            //   });
+            _http = httpClientFactory.CreateClient("daily");
+            _http.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", apiKey);
         }
 
         public async Task<string> CreateRoomAsync(string roomName, int expirySeconds = 7200)
@@ -48,27 +53,38 @@ namespace AgricHub.BLL.Implementations.ChatServices
                 var body = await response.Content.ReadAsStringAsync();
                 _logger.LogError("Daily.co room creation failed ({Status}): {Body}", response.StatusCode, body);
 
-                // Daily.co returns 400 with "already exists" if the room name is reused —
-                // fetch the existing room, but ONLY reuse it if it hasn't expired.
-                if (response.StatusCode == System.Net.HttpStatusCode.BadRequest && body.Contains("already exists"))
+                if (response.StatusCode == System.Net.HttpStatusCode.BadRequest
+                    && body.Contains("already exists"))
                 {
-                    var existing = await _http.GetFromJsonAsync<DailyRoomResponse>($"rooms/{roomName}");
-                    var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-
-                    // ── FIXED: the old fallback returned the stale room unconditionally,
-                    // even if it had already expired — joiners would get a blank iframe
-                    // since Daily.co rejects connections to expired rooms. ─────────────────
-                    if (existing?.Url is { Length: > 0 } && existing.Config?.Exp is long exp && exp > nowUnix)
+                    // FIX 2: GetFromJsonAsync throws on non-2xx — use a raw GET with
+                    // explicit success check so a failed fetch doesn't crash the request.
+                    DailyRoomResponse? existing = null;
+                    try
                     {
-                        _logger.LogInformation("Reusing existing, still-valid Daily.co room '{Room}' (expires in {Seconds}s).",
+                        var fetchRes = await _http.GetAsync($"rooms/{roomName}");
+                        if (fetchRes.IsSuccessStatusCode)
+                            existing = await fetchRes.Content.ReadFromJsonAsync<DailyRoomResponse>();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Could not fetch existing Daily.co room '{Room}'.", roomName);
+                    }
+
+                    var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                    if (existing?.Url is { Length: > 0 }
+                        && existing.Config?.Exp is long exp
+                        && exp > nowUnix)
+                    {
+                        _logger.LogInformation(
+                            "Reusing existing, still-valid Daily.co room '{Room}' (expires in {Seconds}s).",
                             roomName, exp - nowUnix);
                         return existing.Url;
                     }
 
-                    _logger.LogWarning("Existing Daily.co room '{Room}' has expired or has no exp — creating a fresh room instead.", roomName);
+                    _logger.LogWarning(
+                        "Existing Daily.co room '{Room}' has expired or is unreachable — creating a fresh room.",
+                        roomName);
 
-                    // Expired (or unreadable exp) — create a fresh room with a unique name
-                    // rather than handing back a dead link.
                     var freshName = $"{roomName}-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
                     return await CreateRoomAsync(freshName, expirySeconds);
                 }
@@ -84,11 +100,14 @@ namespace AgricHub.BLL.Implementations.ChatServices
         }
 
         /// <summary>
-        /// Creates a meeting token for a participant. Use isOwner=true for the consultant
-        /// so they can mute/kick participants and control the room; customers join without
-        /// a token (or with isOwner=false) using just the room URL.
+        /// Creates a meeting token for a participant. Consultants always get isOwner=true
+        /// so they can mute/remove participants and control the room.
         /// </summary>
-        public async Task<string> CreateMeetingTokenAsync(string roomName, bool isOwner = false, string? userName = null, int expirySeconds = 7200)
+        public async Task<string> CreateMeetingTokenAsync(
+            string roomName,
+            bool isOwner = false,
+            string? userName = null,
+            int expirySeconds = 7200)
         {
             var payload = new
             {
@@ -102,10 +121,12 @@ namespace AgricHub.BLL.Implementations.ChatServices
             };
 
             var response = await _http.PostAsJsonAsync("meeting-tokens", payload);
+
             if (!response.IsSuccessStatusCode)
             {
                 var body = await response.Content.ReadAsStringAsync();
-                _logger.LogError("Daily.co meeting token creation failed ({Status}): {Body}", response.StatusCode, body);
+                _logger.LogError("Daily.co meeting token creation failed ({Status}): {Body}",
+                    response.StatusCode, body);
                 throw new InvalidOperationException("Could not create meeting token.");
             }
 
@@ -118,23 +139,18 @@ namespace AgricHub.BLL.Implementations.ChatServices
 
         private class DailyRoomResponse
         {
-            [JsonPropertyName("url")]
-            public string? Url { get; set; }
-
-            [JsonPropertyName("config")]
-            public DailyRoomConfig? Config { get; set; }
+            [JsonPropertyName("url")] public string? Url { get; set; }
+            [JsonPropertyName("config")] public DailyRoomConfig? Config { get; set; }
         }
 
         private class DailyRoomConfig
         {
-            [JsonPropertyName("exp")]
-            public long? Exp { get; set; }
+            [JsonPropertyName("exp")] public long? Exp { get; set; }
         }
 
         private class DailyTokenResponse
         {
-            [JsonPropertyName("token")]
-            public string? Token { get; set; }
+            [JsonPropertyName("token")] public string? Token { get; set; }
         }
     }
 }

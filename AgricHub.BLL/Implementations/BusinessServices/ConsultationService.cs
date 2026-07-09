@@ -1,4 +1,24 @@
 ﻿// AgricHub.BLL/Implementations/BusinessServices/ConsultationService.cs
+//
+// PATCH: Fire-and-forget Sendbird calls
+// -------------------------------------
+// Every SendAdminMessageAsync / SendNotificationAsync call was previously
+// awaited inline, right before returning a response to the user. Since
+// ISendbirdService's HttpClient has a 15s timeout with up to 2 retry
+// attempts, a single slow/degraded Sendbird call could block a user-facing
+// action (refunds, bookings, approvals, etc.) for 15-30+ seconds even
+// though the actual business logic (DB writes, wallet updates) had already
+// completed successfully.
+//
+// Fix: FireAdminMessage() / FireNotification() run the Sendbird call on an
+// independent Task with its own DI scope (via IServiceScopeFactory), so:
+//   1. The method returns to the caller immediately after its real work.
+//   2. The background call isn't torn down when the request's DI scope
+//      disposes (which would happen if we just did `_ = _sendbirdService...`
+//      using the request-scoped instance directly).
+//   3. Failures are logged but never bubble up or block anything — matches
+//      the existing "never crash on Sendbird failure" philosophy already
+//      used throughout this file's try/catch-less inline awaits.
 
 using AgricHub.BLL.Interfaces.ChatServices;
 using AgricHub.BLL.Interfaces.IBusinessServices;
@@ -11,6 +31,7 @@ using AutoMapper;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System.Security.Claims;
 
@@ -35,6 +56,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
         private readonly IWebHostEnvironment _env;
         private readonly IMapper _mapper;
         private readonly ILogger<ConsultationService> _logger;
+        private readonly IServiceScopeFactory _scopeFactory;
 
         private const decimal CustomerNoShowPayoutPercentage = 0.5m;
         private const int GracePeriodMinutes = 15;
@@ -46,7 +68,8 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             IHttpContextAccessor httpContextAccessor,
             IWebHostEnvironment env,
             IMapper mapper,
-            ILogger<ConsultationService> logger)
+            ILogger<ConsultationService> logger,
+            IServiceScopeFactory scopeFactory)
         {
             _unitOfWork             = unitOfWork;
             _consultationRepo       = _unitOfWork.GetRepository<Consultation>();
@@ -65,6 +88,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             _env                    = env;
             _mapper                 = mapper;
             _logger                 = logger;
+            _scopeFactory           = scopeFactory;
         }
 
         private string GetUserId()
@@ -117,6 +141,46 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             consultation.IsCustomOffer
                 ? (consultation.CustomPrice ?? 0)
                 : (consultation.ServicePackage?.Price ?? 0);
+
+        // ── Fire-and-forget Sendbird helpers ────────────────────────────────────
+        // These never block the caller. Each runs on its own Task with a fresh
+        // DI scope, so it survives past the disposal of the request's own scope.
+        // Failures are logged only — matches the existing "never fail the
+        // business action because of a chat/notification hiccup" philosophy.
+
+        private void FireAdminMessage(string channelUrl, string message, object? data = null)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    using var scope = _scopeFactory.CreateScope();
+                    var sb = scope.ServiceProvider.GetRequiredService<ISendbirdService>();
+                    await sb.SendAdminMessageAsync(channelUrl, message, data);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[Sendbird] Fire-and-forget admin message failed for channel {ChannelUrl}", channelUrl);
+                }
+            });
+        }
+
+        private void FireNotification(string userId, string message, string type, object? data = null)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    using var scope = _scopeFactory.CreateScope();
+                    var sb = scope.ServiceProvider.GetRequiredService<ISendbirdService>();
+                    await sb.SendNotificationAsync(userId, message, type, data);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[Sendbird] Fire-and-forget notification failed for user {UserId}, type={Type}", userId, type);
+                }
+            });
+        }
 
         // ── Book ────────────────────────────────────────────────────────────────
 
@@ -201,7 +265,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             if (existingChat != null)
             {
-                consultation.SendbirdChannelUrl = existingChat.SendbirdChannelUrl;
+                consultation.SendbirdChannelUrl = await EnsureChatSessionChannelAsync(existingChat);
             }
             else
             {
@@ -254,10 +318,14 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 ? $"Booking request for {service.ServiceName} ({package.PackageName}). ${package.Price} held in escrow."
                 : $"Booking request for {service.ServiceName} ({package.PackageName}). ${package.Price} held in escrow. Notes: {dto.Notes}";
 
+            // NOTE: kept as an inline await (not fire-and-forget) so the chat
+            // message is guaranteed to land before the push notification below —
+            // ordering matters here since the notification references the booking
+            // that this message documents in the channel.
             await _sendbirdService.SendMessageAsync(saved!.SendbirdChannelUrl, customer.UserId, message, false,
                 new { ServiceId = service.Id, ServiceName = service.ServiceName, PackageId = package.Id, PackageName = package.PackageName, Price = package.Price });
 
-            await _sendbirdService.SendNotificationAsync(consultant.UserId,
+            FireNotification(consultant.UserId,
                 $"📋 New booking from {customer.FirstName} {customer.LastName} · {service.ServiceName} on {dto.ScheduledAt:MMM d, h:mm tt}",
                 "booking_request");
 
@@ -306,9 +374,9 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             var msg = string.IsNullOrEmpty(notes)
                 ? $"✅ Booking approved · {consultation.Service.ServiceName} · ${amount} held in escrow."
                 : $"✅ Booking approved · {consultation.Service.ServiceName} · ${amount} held in escrow. Notes: {notes}";
-            await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl, msg);
+            FireAdminMessage(consultation.SendbirdChannelUrl, msg);
 
-            await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId,
+            FireNotification(consultation.Customer.UserId,
                 $"✅ Your booking for {consultation.Service.ServiceName} is confirmed · {consultation.ScheduledAt:MMM d, h:mm tt}",
                 "booking_confirmed");
 
@@ -360,10 +428,10 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             await _consultationRepo.UpdateAsync(consultation);
             await _unitOfWork.SaveChangesAsync();
 
-            await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl,
+            FireAdminMessage(consultation.SendbirdChannelUrl,
                 $"❌ Booking declined. Reason: {reason}. ${escrow?.Amount ?? 0} refunded.");
 
-            await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId,
+            FireNotification(consultation.Customer.UserId,
                 $"❌ Your booking for {consultation.Service.ServiceName} was declined · ${escrow?.Amount ?? 0} refunded",
                 "booking_rejected");
 
@@ -407,12 +475,12 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             await _unitOfWork.SaveChangesAsync();
 
             var amount = ResolvePrice(consultation);
-            await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl,
+            FireAdminMessage(consultation.SendbirdChannelUrl,
                 $"🚀 Session started · {consultation.Service.ServiceName} · ${amount} held in escrow.");
 
             var customer = await _customerRepo.GetSingleByAsync(c => c.Id == consultation.CustomerId);
             if (customer != null)
-                await _sendbirdService.SendNotificationAsync(customer.UserId,
+                FireNotification(customer.UserId,
                     $"🚀 Your session for {consultation.Service.ServiceName} has started", "session_started");
 
             _logger.LogInformation("[Start] Consultation {Id} started at {StartedAt} UTC · Service: {Service}.",
@@ -482,12 +550,12 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             var escrow = await FindEscrowAsync(consultationId);
 
-            await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl,
+            FireAdminMessage(consultation.SendbirdChannelUrl,
                 $"📄 {consultation.Consultant.FirstName} submitted the work for review · {consultation.Service.ServiceName}. " +
                 $"Please review and approve to release the ${ResolvePrice(consultation)} held in escrow. " +
                 $"If not reviewed within {CompletionApprovalGraceHours / 24} days, it will release automatically.");
 
-            await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId,
+            FireNotification(consultation.Customer.UserId,
                 $"📄 {consultation.Consultant.FirstName} {consultation.Consultant.LastName} submitted work for {consultation.Service.ServiceName} · Please review and approve",
                 "completion_submitted");
 
@@ -549,14 +617,14 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             await _unitOfWork.SaveChangesAsync();
 
             var amount = ResolvePrice(consultation);
-            await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl,
+            FireAdminMessage(consultation.SendbirdChannelUrl,
                 $"✅ Customer approved the submission · {consultation.Service.ServiceName} · ${amount} released to consultant wallet.");
 
-            await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId,
+            FireNotification(consultation.Customer.UserId,
                 $"✅ Session with {consultation.Consultant.FirstName} {consultation.Consultant.LastName} is complete · Please leave a review",
                 "session_complete");
 
-            await _sendbirdService.SendNotificationAsync(consultation.Consultant.UserId,
+            FireNotification(consultation.Consultant.UserId,
                 $"💰 ${escrow.Amount} released to your wallet · {consultation.Service.ServiceName}",
                 "payout_released");
 
@@ -597,10 +665,10 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             var escrow = await FindEscrowAsync(consultationId);
 
-            await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl,
+            FireAdminMessage(consultation.SendbirdChannelUrl,
                 $"🚩 Customer raised a dispute on this submission · Reason: {reason}. Escrow remains held pending review by our team — the 3-day auto-release is paused.");
 
-            await _sendbirdService.SendNotificationAsync(consultation.Consultant.UserId,
+            FireNotification(consultation.Consultant.UserId,
                 $"🚩 A dispute was raised on your submission for {consultation.Service.ServiceName} · Our team will review and contact you",
                 "completion_disputed");
 
@@ -688,13 +756,13 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 consultation.Status      = "Completed";
                 consultation.CompletedAt = DateTime.UtcNow;
 
-                await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl,
+                FireAdminMessage(consultation.SendbirdChannelUrl,
                     $"✅ Dispute resolved by our team — submission approved. ${amount} released to consultant."
                     + (string.IsNullOrWhiteSpace(notes) ? "" : $" Notes: {notes}"));
-                await _sendbirdService.SendNotificationAsync(consultation.Consultant.UserId,
+                FireNotification(consultation.Consultant.UserId,
                     $"✅ Dispute resolved in your favor · ${amount} released to your wallet · {consultation.Service.ServiceName}",
                     "payout_released");
-                await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId,
+                FireNotification(consultation.Customer.UserId,
                     $"Our team reviewed your dispute and approved the consultant's work · {consultation.Service.ServiceName}",
                     "session_complete");
             }
@@ -723,13 +791,13 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
                 consultation.Status = "Cancelled";
 
-                await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl,
+                FireAdminMessage(consultation.SendbirdChannelUrl,
                     $"⚠️ Dispute resolved by our team — submission rejected. ${amount} refunded to customer."
                     + (string.IsNullOrWhiteSpace(notes) ? "" : $" Notes: {notes}"));
-                await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId,
+                FireNotification(consultation.Customer.UserId,
                     $"💰 Dispute resolved · ${amount} refunded to your wallet · {consultation.Service.ServiceName}",
                     "booking_cancelled");
-                await _sendbirdService.SendNotificationAsync(consultation.Consultant.UserId,
+                FireNotification(consultation.Consultant.UserId,
                     $"Our team reviewed the dispute and refunded the customer for {consultation.Service.ServiceName}",
                     "booking_cancelled");
             }
@@ -798,14 +866,14 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             await _unitOfWork.SaveChangesAsync();
 
             var amount = ResolvePrice(consultation);
-            await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl,
+            FireAdminMessage(consultation.SendbirdChannelUrl,
                 $"⏰ Review window expired · ${amount} automatically released to consultant wallet · {consultation.Service.ServiceName}.");
 
-            await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId,
+            FireNotification(consultation.Customer.UserId,
                 $"⏰ Your {CompletionApprovalGraceHours / 24}-day review window for {consultation.Service.ServiceName} expired · payment was released automatically",
                 "session_complete");
 
-            await _sendbirdService.SendNotificationAsync(consultation.Consultant.UserId,
+            FireNotification(consultation.Consultant.UserId,
                 $"💰 ${escrow.Amount} automatically released to your wallet (review window expired) · {consultation.Service.ServiceName}",
                 "payout_released");
 
@@ -863,14 +931,14 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             var msg = string.IsNullOrEmpty(reason)
                 ? $"⚠️ Booking cancelled. ${escrow?.Amount ?? 0} refunded."
                 : $"⚠️ Booking cancelled. Reason: {reason}. ${escrow?.Amount ?? 0} refunded.";
-            await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl, msg);
+            FireAdminMessage(consultation.SendbirdChannelUrl, msg);
 
             var cancelledByCustomer = (await _customerRepo.GetSingleByAsync(c => c.UserId == userId)) != null;
             if (cancelledByCustomer && consultation.Consultant != null)
-                await _sendbirdService.SendNotificationAsync(consultation.Consultant.UserId,
+                FireNotification(consultation.Consultant.UserId,
                     $"⚠️ Booking cancelled by customer · {consultation.Service?.ServiceName}", "booking_cancelled");
             else if (!cancelledByCustomer && consultation.Customer != null)
-                await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId,
+                FireNotification(consultation.Customer.UserId,
                     $"⚠️ Booking cancelled by consultant · ${escrow?.Amount ?? 0} refunded", "booking_cancelled");
 
             _logger.LogInformation("[Cancel] Consultation {Id} cancelled by {CancelledBy} · Refunded ${Amount}.",
@@ -913,12 +981,12 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             await _consultationRepo.UpdateAsync(consultation);
             await _unitOfWork.SaveChangesAsync();
 
-            await _sendbirdService.SendNotificationAsync(
+            FireNotification(
                 consultation.Consultant.UserId,
                 $"⚠️ No-show reported by customer · {consultation.Service.ServiceName} · You have {graceHours}h to respond",
                 "noshow_request");
 
-            await _sendbirdService.SendAdminMessageAsync(
+            FireAdminMessage(
                 consultation.SendbirdChannelUrl,
                 $"⚠️ Customer has reported a no-show. Consultant has {graceHours} hours to respond (click 'I'm here' on your schedule). If no response, escrow will be automatically refunded.");
 
@@ -947,12 +1015,12 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             await _consultationRepo.UpdateAsync(consultation);
             await _unitOfWork.SaveChangesAsync();
 
-            await _sendbirdService.SendNotificationAsync(
+            FireNotification(
                 consultation.Customer.UserId,
                 $"✅ {consultant.FirstName} confirmed they are present · {consultation.Service.ServiceName} · Session is resuming",
                 "noshow_dismissed");
 
-            await _sendbirdService.SendAdminMessageAsync(
+            FireAdminMessage(
                 consultation.SendbirdChannelUrl,
                 $"✅ Consultant confirmed presence. No-show request dismissed. Session continues.");
 
@@ -996,9 +1064,9 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 _consultantRepo.Update(consultation.Consultant);
                 await _consultationRepo.UpdateAsync(consultation);
 
-                await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId, $"💰 No-show confirmed · ${escrow?.Amount ?? 0} refunded to your wallet · {consultation.Service.ServiceName}", "booking_cancelled");
-                await _sendbirdService.SendNotificationAsync(consultation.Consultant.UserId, $"⚠️ No-show processed for {consultation.Service.ServiceName} · No-show count: {consultation.Consultant.NoShowCount}", "noshow_processed");
-                await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl, $"❌ No-show grace period expired. ${escrow?.Amount ?? 0} automatically refunded to customer.");
+                FireNotification(consultation.Customer.UserId, $"💰 No-show confirmed · ${escrow?.Amount ?? 0} refunded to your wallet · {consultation.Service.ServiceName}", "booking_cancelled");
+                FireNotification(consultation.Consultant.UserId, $"⚠️ No-show processed for {consultation.Service.ServiceName} · No-show count: {consultation.Consultant.NoShowCount}", "noshow_processed");
+                FireAdminMessage(consultation.SendbirdChannelUrl, $"❌ No-show grace period expired. ${escrow?.Amount ?? 0} automatically refunded to customer.");
             }
 
             if (all.Any()) await _unitOfWork.SaveChangesAsync();
@@ -1039,9 +1107,9 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 _logger.LogInformation("[ApprovalExpiry] Auto-released ${Amount} to consultant for consultation {Id} · {Service}.",
                     amount, consultation.Id, consultation.Service?.ServiceName);
 
-                await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl, $"⏰ Review window expired · ${amount} automatically released to consultant wallet · {consultation.Service.ServiceName}.");
-                await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId, $"⏰ Your {CompletionApprovalGraceHours / 24}-day review window for {consultation.Service.ServiceName} expired · payment was released automatically", "session_complete");
-                await _sendbirdService.SendNotificationAsync(consultation.Consultant.UserId, $"💰 ${escrow.Amount} automatically released to your wallet (review window expired) · {consultation.Service.ServiceName}", "payout_released");
+                FireAdminMessage(consultation.SendbirdChannelUrl, $"⏰ Review window expired · ${amount} automatically released to consultant wallet · {consultation.Service.ServiceName}.");
+                FireNotification(consultation.Customer.UserId, $"⏰ Your {CompletionApprovalGraceHours / 24}-day review window for {consultation.Service.ServiceName} expired · payment was released automatically", "session_complete");
+                FireNotification(consultation.Consultant.UserId, $"💰 ${escrow.Amount} automatically released to your wallet (review window expired) · {consultation.Service.ServiceName}", "payout_released");
             }
 
             if (all.Any()) await _unitOfWork.SaveChangesAsync();
@@ -1098,9 +1166,9 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                     _logger.LogInformation("[CustomerNoShow] Split ${Total} — ${Payout} to consultant, ${Refund} to customer for consultation {Id}.",
                         totalAmount, consultantPayout, customerRefund, consultation.Id);
 
-                    await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl, $"❌ Customer no-show grace period expired. ${consultantPayout} credited to consultant, ${customerRefund} refunded to customer.");
-                    await _sendbirdService.SendNotificationAsync(consultation.Consultant.UserId, $"💰 Customer no-show confirmed · ${consultantPayout} credited · {consultation.Service.ServiceName}", "payout_released");
-                    await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId, $"⚠️ No-show grace period expired · ${customerRefund} refunded · {consultation.Service.ServiceName}", "booking_cancelled");
+                    FireAdminMessage(consultation.SendbirdChannelUrl, $"❌ Customer no-show grace period expired. ${consultantPayout} credited to consultant, ${customerRefund} refunded to customer.");
+                    FireNotification(consultation.Consultant.UserId, $"💰 Customer no-show confirmed · ${consultantPayout} credited · {consultation.Service.ServiceName}", "payout_released");
+                    FireNotification(consultation.Customer.UserId, $"⚠️ No-show grace period expired · ${customerRefund} refunded · {consultation.Service.ServiceName}", "booking_cancelled");
                 }
 
                 await _consultationRepo.UpdateAsync(consultation);
@@ -1144,12 +1212,12 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             await _consultationRepo.UpdateAsync(consultation);
             await _unitOfWork.SaveChangesAsync();
 
-            await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl,
+            FireAdminMessage(consultation.SendbirdChannelUrl,
                 $"📅 Session rescheduled from {oldDate:MMM d, h:mm tt} → {newScheduledAt:MMM d, h:mm tt} UTC.");
 
-            await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId,
+            FireNotification(consultation.Customer.UserId,
                 $"📅 Session rescheduled to {newScheduledAt:MMM d, h:mm tt} · {consultation.Service.ServiceName}", "rescheduled");
-            await _sendbirdService.SendNotificationAsync(consultation.Consultant.UserId,
+            FireNotification(consultation.Consultant.UserId,
                 $"📅 Customer rescheduled the session to {newScheduledAt:MMM d, h:mm tt} · {consultation.Service.ServiceName}", "rescheduled");
 
             _logger.LogInformation("[Reschedule] Consultation {Id} rescheduled from {Old} to {New} UTC.",
@@ -1197,8 +1265,8 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             await _consultationRepo.UpdateAsync(consultation);
             await _unitOfWork.SaveChangesAsync();
 
-            await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl, $"❌ Consultant no-show confirmed. ${escrow?.Amount ?? 0} refunded.");
-            await _sendbirdService.SendNotificationAsync(customer.UserId, $"💰 No-show confirmed · ${escrow?.Amount ?? 0} refunded", "booking_cancelled");
+            FireAdminMessage(consultation.SendbirdChannelUrl, $"❌ Consultant no-show confirmed. ${escrow?.Amount ?? 0} refunded.");
+            FireNotification(customer.UserId, $"💰 No-show confirmed · ${escrow?.Amount ?? 0} refunded", "booking_cancelled");
 
             _logger.LogInformation("[ReportNoShow] Consultant no-show confirmed for consultation {Id} · Refunded ${Amount}.",
                 consultationId, escrow?.Amount ?? 0);
@@ -1253,8 +1321,8 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 await _walletTransactionRepo.AddAsync(new WalletTransaction { CustomerId = consultation.CustomerId, ConsultantId = null, Amount = customerRefund, TransactionType = "CustomerNoShowRefund", Status = "Completed", CreatedAt = DateTime.UtcNow, CompletedAt = DateTime.UtcNow });
                 await _walletTransactionRepo.AddAsync(new WalletTransaction { CustomerId = null, ConsultantId = consultation.ConsultantId, Amount = consultantPayout, TransactionType = "CustomerNoShowPayout", Status = "Completed", CreatedAt = DateTime.UtcNow, CompletedAt = DateTime.UtcNow });
 
-                await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl, $"❌ Customer no-show. ${consultantPayout} credited to consultant, ${customerRefund} refunded to customer.");
-                await _sendbirdService.SendNotificationAsync(consultation.Consultant.UserId, $"💰 Customer no-show · ${consultantPayout} credited to your wallet", "payout_released");
+                FireAdminMessage(consultation.SendbirdChannelUrl, $"❌ Customer no-show. ${consultantPayout} credited to consultant, ${customerRefund} refunded to customer.");
+                FireNotification(consultation.Consultant.UserId, $"💰 Customer no-show · ${consultantPayout} credited to your wallet", "payout_released");
 
                 _logger.LogInformation("[CustomerNoShow] Consultation {Id} · ${Payout} to consultant, ${Refund} to customer.",
                     consultationId, consultantPayout, customerRefund);
@@ -1300,9 +1368,9 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             await _consultationRepo.UpdateAsync(consultation);
             await _unitOfWork.SaveChangesAsync();
 
-            await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId,
+            FireNotification(consultation.Customer.UserId,
                 $"⚠️ Consultant reported you as no-show · {consultation.Service.ServiceName} · Respond within {graceHours}h", "customer_noshow_request");
-            await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl,
+            FireAdminMessage(consultation.SendbirdChannelUrl,
                 $"⚠️ Consultant has reported a customer no-show. Customer has {graceHours} hours to respond before 50/50 split is applied.");
 
             _logger.LogInformation("[CustomerNoShowRequest] Consultant reported customer no-show for consultation {Id} · Grace: {Hours}h.", consultationId, graceHours);
@@ -1342,9 +1410,9 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             await _consultationRepo.UpdateAsync(consultation);
             await _unitOfWork.SaveChangesAsync();
 
-            await _sendbirdService.SendNotificationAsync(consultation.Consultant.UserId,
+            FireNotification(consultation.Consultant.UserId,
                 $"✅ Customer confirmed they are joining · {consultation.Service.ServiceName}", "customer_noshow_dismissed");
-            await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl,
+            FireAdminMessage(consultation.SendbirdChannelUrl,
                 $"✅ Customer confirmed presence. No-show request dismissed. Session continues.");
 
             _logger.LogInformation("[DismissCustomerNoShow] Customer dismissed no-show for consultation {Id}.", consultationId);
@@ -1421,10 +1489,10 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             await _consultationRepo.UpdateAsync(consultation);
             await _unitOfWork.SaveChangesAsync();
 
-            await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl,
+            FireAdminMessage(consultation.SendbirdChannelUrl,
                 $"📅 {consultant.FirstName} {consultant.LastName} has requested to reschedule this session.\n" +
                 $"Reason: \"{reason.Trim()}\"\nPlease go to your Consultations page and choose a new time.");
-            await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId,
+            FireNotification(consultation.Customer.UserId,
                 $"📅 {consultant.FirstName} {consultant.LastName} requested to reschedule your {consultation.Service.ServiceName} session — please pick a new time",
                 "reschedule_request");
 
@@ -1495,14 +1563,14 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 await _consultationRepo.UpdateAsync(consultation);
                 flagged++;
 
-                await _sendbirdService.SendAdminMessageAsync(consultation.SendbirdChannelUrl,
+                FireAdminMessage(consultation.SendbirdChannelUrl,
                     $"⏰ This session exceeded its {durationMinutes}-minute duration and has not been submitted for review. " +
                     $"{consultation.Consultant.FirstName}, please submit your work summary to release the ${ResolvePrice(consultation)} in escrow. " +
                     $"If the session was not completed, the customer may report a no-show.");
 
-                await _sendbirdService.SendNotificationAsync(consultation.Consultant.UserId,
+                FireNotification(consultation.Consultant.UserId,
                     $"⏰ Your session for {consultation.Service.ServiceName} is overdue — please submit your work summary", "session_overdue");
-                await _sendbirdService.SendNotificationAsync(consultation.Customer.UserId,
+                FireNotification(consultation.Customer.UserId,
                     $"⏰ Your {consultation.Service.ServiceName} session has exceeded its duration. The consultant has been prompted to submit — you may also report a no-show if they did not attend.", "session_overdue");
             }
 
@@ -1545,7 +1613,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
                 if (age >= TimeSpan.FromHours(12) && c.PendingReminderSentAt == null)
                 {
-                    await _sendbirdService.SendNotificationAsync(c.Consultant.UserId,
+                    FireNotification(c.Consultant.UserId,
                         $"⏳ You have an unanswered booking request from {c.Customer.FirstName} {c.Customer.LastName} · {c.Service.ServiceName} · Please approve or reject",
                         "pending_reminder");
                     c.PendingReminderSentAt = DateTime.UtcNow;
@@ -1556,7 +1624,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
                 if (age >= TimeSpan.FromHours(24) && c.PendingCancelNudgeSentAt == null)
                 {
-                    await _sendbirdService.SendNotificationAsync(c.Customer.UserId,
+                    FireNotification(c.Customer.UserId,
                         $"⏳ Your booking with {c.Consultant.FirstName} {c.Consultant.LastName} for {c.Service.ServiceName} hasn't been answered in 24h · You can cancel for a full refund if you'd like",
                         "pending_cancel_available");
                     c.PendingCancelNudgeSentAt = DateTime.UtcNow;
@@ -1582,7 +1650,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             {
                 if (DateTime.UtcNow < c.ScheduledAt) continue;
 
-                await _sendbirdService.SendNotificationAsync(c.Consultant.UserId,
+                FireNotification(c.Consultant.UserId,
                     $"⏰ Your session with {c.Customer.FirstName} {c.Customer.LastName} for {c.Service.ServiceName} was scheduled to start now · Please start the session",
                     "approved_start_reminder");
                 c.ApprovedStartReminderSentAt = DateTime.UtcNow;
@@ -1609,7 +1677,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 if (age < TimeSpan.FromHours(24)) continue;
 
                 var hoursLeft = CompletionApprovalGraceHours - (int)age.TotalHours;
-                await _sendbirdService.SendNotificationAsync(c.Customer.UserId,
+                FireNotification(c.Customer.UserId,
                     $"📄 Reminder: {c.Consultant.FirstName} {c.Consultant.LastName}'s submission for {c.Service.ServiceName} is awaiting your review · Auto-releases in ~{Math.Max(hoursLeft, 0)}h",
                     "pending_approval_reminder");
                 c.PendingApprovalReminderSentAt = DateTime.UtcNow;
@@ -1619,6 +1687,35 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             }
 
             if (changed > 0) await _unitOfWork.SaveChangesAsync();
+        }
+
+        private async Task<string> EnsureChatSessionChannelAsync(ChatSession session)
+        {
+            if (!string.IsNullOrWhiteSpace(session.SendbirdChannelUrl))
+                return session.SendbirdChannelUrl;
+
+            var customerUserId = session.Customer?.UserId;
+            var consultantUserId = session.Consultant?.UserId;
+
+            if (string.IsNullOrEmpty(customerUserId) || string.IsNullOrEmpty(consultantUserId))
+            {
+                var full = await _chatSessionRepo.GetSingleByAsync(
+                    cs => cs.Id == session.Id,
+                    include: q => q.Include(cs => cs.Customer).Include(cs => cs.Consultant))
+                    ?? throw new KeyNotFoundException("Chat session not found.");
+                customerUserId   = full.Customer?.UserId ?? throw new InvalidOperationException("Customer UserId missing.");
+                consultantUserId = full.Consultant?.UserId ?? throw new InvalidOperationException("Consultant UserId missing.");
+            }
+
+            await _sendbirdService.EnsureSendbirdUserAsync(customerUserId, customerUserId);
+            await _sendbirdService.EnsureSendbirdUserAsync(consultantUserId, consultantUserId);
+            var newChannelUrl = await _sendbirdService.CreateGroupChannelAsync(customerUserId, consultantUserId);
+
+            session.SendbirdChannelUrl = newChannelUrl;
+            _chatSessionRepo.Update(session);
+            await _unitOfWork.SaveChangesAsync();
+
+            return newChannelUrl;
         }
 
         // 4. OverdueReview stuck: re-reminder every 24h to both parties
@@ -1635,10 +1732,10 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 var lastReminder = c.OverdueReviewReminderSentAt ?? c.StartedAt ?? c.CreatedAt;
                 if (DateTime.UtcNow - lastReminder < TimeSpan.FromHours(24)) continue;
 
-                await _sendbirdService.SendNotificationAsync(c.Consultant.UserId,
+                FireNotification(c.Consultant.UserId,
                     $"⏰ Still overdue: {c.Service.ServiceName} with {c.Customer.FirstName} {c.Customer.LastName} needs your work summary to release escrow",
                     "overdue_review_reminder");
-                await _sendbirdService.SendNotificationAsync(c.Customer.UserId,
+                FireNotification(c.Customer.UserId,
                     $"⏰ Still waiting: your {c.Service.ServiceName} session is overdue for review · You may report a no-show if it didn't happen",
                     "overdue_review_reminder");
 

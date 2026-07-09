@@ -55,6 +55,46 @@ namespace AgricHub.BLL.Implementations
             return userId;
         }
 
+        // ── Channel recovery helper ────────────────────────────────────────────
+        // When the DB has an empty channel URL (cleared after switching Sendbird
+        // accounts), recreate the channel on the new account and persist the new
+        // URL so subsequent calls don't have to recreate it again.
+
+        private async Task<string> EnsureChannelAsync(ChatSession session)
+        {
+            if (!string.IsNullOrWhiteSpace(session.SendbirdChannelUrl))
+                return session.SendbirdChannelUrl;
+
+            // Need both user IDs — load them if not already included
+            var customerUserId = session.Customer?.UserId;
+            var consultantUserId = session.Consultant?.UserId;
+
+            if (string.IsNullOrEmpty(customerUserId) || string.IsNullOrEmpty(consultantUserId))
+            {
+                // Re-fetch with includes
+                var full = await _chatSessionRepo.GetSingleByAsync(
+                    cs => cs.Id == session.Id,
+                    include: q => q.Include(cs => cs.Customer).Include(cs => cs.Consultant))
+                    ?? throw new KeyNotFoundException("Chat session not found.");
+                customerUserId   = full.Customer?.UserId ?? throw new InvalidOperationException("Customer UserId missing.");
+                consultantUserId = full.Consultant?.UserId ?? throw new InvalidOperationException("Consultant UserId missing.");
+            }
+
+            // Recreate both Sendbird users and the channel on the new account
+            await _sendbirdService.EnsureSendbirdUserAsync(customerUserId, customerUserId);
+            await _sendbirdService.EnsureSendbirdUserAsync(consultantUserId, consultantUserId);
+            var newChannelUrl = await _sendbirdService.CreateGroupChannelAsync(customerUserId, consultantUserId);
+
+            // Persist the new URL so future calls are fast
+            session.SendbirdChannelUrl = newChannelUrl;
+            _chatSessionRepo.Update(session);
+            await _unitOfWork.SaveChangesAsync();
+
+            return newChannelUrl;
+        }
+
+        // ── Initiate chat ──────────────────────────────────────────────────────
+
         public async Task<ChatInitiateResponse> InitiateChatAsync(InitiateChatRequest request)
         {
             var userId = GetUserId();
@@ -80,17 +120,19 @@ namespace AgricHub.BLL.Implementations
                     throw new UnauthorizedAccessException("This service does not belong to the specified consultant.");
             }
 
-            var existingChat = await _chatSessionRepo.GetSingleByAsync(cs =>
-                cs.CustomerId   == customer.Id &&
-                cs.ConsultantId == consultant.Id &&
-                (request.ServiceId == null || cs.ServiceId == request.ServiceId.Value));
+            var existingChat = await _chatSessionRepo.GetSingleByAsync(
+                cs => cs.CustomerId   == customer.Id &&
+                      cs.ConsultantId == consultant.Id &&
+                      (request.ServiceId == null || cs.ServiceId == request.ServiceId.Value),
+                include: q => q.Include(cs => cs.Customer).Include(cs => cs.Consultant));
 
             string channelUrl;
             Guid chatSessionId;
 
             if (existingChat != null)
             {
-                channelUrl    = existingChat.SendbirdChannelUrl;
+                // EnsureChannelAsync recovers empty URLs left by the SQL migration
+                channelUrl    = await EnsureChannelAsync(existingChat);
                 chatSessionId = existingChat.Id;
             }
             else
@@ -137,20 +179,24 @@ namespace AgricHub.BLL.Implementations
             };
         }
 
+        // ── Create custom offer ────────────────────────────────────────────────
+
         public async Task<CustomOfferResponse> CreateCustomOfferAsync(CustomOfferRequest request)
         {
             var userId = GetUserId();
             var consultant = await _consultantRepo.GetSingleByAsync(c => c.UserId == userId)
                              ?? throw new UnauthorizedAccessException("Consultant not found.");
 
-            var chatSession = await _chatSessionRepo.GetSingleByAsync(cs => cs.Id == request.ChatSessionId,
+            var chatSession = await _chatSessionRepo.GetSingleByAsync(
+                cs => cs.Id == request.ChatSessionId,
                 include: q => q.Include(cs => cs.Service).Include(cs => cs.Consultant).Include(cs => cs.Customer))
                 ?? throw new KeyNotFoundException("Chat session not found.");
 
             if (chatSession.ConsultantId != consultant.Id)
                 throw new UnauthorizedAccessException("You are not authorized to create an offer for this chat session.");
 
-            var service = await _servicesRepo.GetSingleByAsync(s => s.Id == request.ServiceId,
+            var service = await _servicesRepo.GetSingleByAsync(
+                s => s.Id == request.ServiceId,
                 include: q => q.Include(s => s.Business))
                 ?? throw new KeyNotFoundException("Service not found.");
 
@@ -158,7 +204,6 @@ namespace AgricHub.BLL.Implementations
                 b => b.Id == service.BusinessId && b.ConsultantId == consultant.Id)
                 ?? throw new UnauthorizedAccessException("This service does not belong to the specified consultant.");
 
-            // ── PATCH: Validate scheduled date is in the future ─────────────────
             if (request.ScheduledAt <= DateTime.UtcNow)
                 throw new InvalidOperationException(
                     "The scheduled date must be in the future. Please choose a date and time that hasn't passed yet.");
@@ -166,7 +211,6 @@ namespace AgricHub.BLL.Implementations
             if (request.ScheduledAt < DateTime.UtcNow.AddMinutes(30))
                 throw new InvalidOperationException(
                     "Please schedule the offer at least 30 minutes from now so the customer has time to review it.");
-            // ────────────────────────────────────────────────────────────────────
 
             var customOffer = _mapper.Map<CustomOffer>(request);
             customOffer.Status    = "Pending";
@@ -175,20 +219,29 @@ namespace AgricHub.BLL.Implementations
             await _customOfferRepo.AddAsync(customOffer);
             await _unitOfWork.SaveChangesAsync();
 
-            var message = $"Custom offer created for service: {service.ServiceName}. Price: ₦{customOffer.Price}. Description: {customOffer.Description}. Onsite: {customOffer.IncludesOnsiteVisit}. Scheduled: {customOffer.ScheduledAt:yyyy-MM-dd HH:mm}.";
-            var offerData = new { OfferId = customOffer.Id, ServiceId = service.Id, ServiceName = service.ServiceName, customOffer.Price, customOffer.Description, customOffer.IncludesOnsiteVisit, customOffer.ScheduledAt, customOffer.DurationMinutes };
-            await _sendbirdService.SendAdminMessageAsync(chatSession.SendbirdChannelUrl, message, offerData);
+            // Ensure channel URL is valid before sending the offer notification
+            var channelUrl = await EnsureChannelAsync(chatSession);
+
+            try
+            {
+                var message = $"Custom offer created for service: {service.ServiceName}. Price: ₦{customOffer.Price}. Description: {customOffer.Description}. Onsite: {customOffer.IncludesOnsiteVisit}. Scheduled: {customOffer.ScheduledAt:yyyy-MM-dd HH:mm}.";
+                var offerData = new { OfferId = customOffer.Id, ServiceId = service.Id, ServiceName = service.ServiceName, customOffer.Price, customOffer.Description, customOffer.IncludesOnsiteVisit, customOffer.ScheduledAt, customOffer.DurationMinutes };
+                await _sendbirdService.SendAdminMessageAsync(channelUrl, message, offerData);
+            }
+            catch { }
 
             try
             {
                 await _sendbirdService.SendNotificationAsync(chatSession.Customer.UserId,
-                    $"💼 {consultant.FirstName} {consultant.LastName} sent you a custom offer for {service.ServiceName} · ₦{customOffer.Price:N2}",
+                    $"💼 {consultant.FirstName} {consultant.LastName} sent you a custom offer for {service.ServiceName} · ₦{request.Price:N2}",
                     "custom_offer_received");
             }
-            catch { /* Don't fail the offer creation if the notification fails */ }
+            catch { }
 
             return _mapper.Map<CustomOfferResponse>(customOffer);
         }
+
+        // ── Accept custom offer ────────────────────────────────────────────────
 
         public async Task<CustomOfferResponse> AcceptCustomOfferAsync(Guid offerId)
         {
@@ -222,6 +275,9 @@ namespace AgricHub.BLL.Implementations
             if (customerWallet == null || customerWallet.Balance < customOffer.Price)
                 throw new InvalidOperationException("Insufficient wallet balance. Please top up your wallet.");
 
+            // Ensure channel URL is valid before we write it to the new Consultation
+            var channelUrl = await EnsureChannelAsync(customOffer.ChatSession);
+
             await _unitOfWork.BeginTransactionAsync();
             try
             {
@@ -239,7 +295,7 @@ namespace AgricHub.BLL.Implementations
                     ScheduledAt           = customOffer.ScheduledAt.Value,
                     EndAt                 = customOffer.ScheduledAt.Value.AddMinutes(customOffer.DurationMinutes),
                     Status                = "Pending",
-                    SendbirdChannelUrl    = customOffer.ChatSession.SendbirdChannelUrl,
+                    SendbirdChannelUrl    = channelUrl,   // ← use recovered URL
                     CreatedAt             = DateTime.UtcNow,
                     IsCustomOffer         = true,
                     CustomPrice           = customOffer.Price,
@@ -278,7 +334,7 @@ namespace AgricHub.BLL.Implementations
 
                 try
                 {
-                    await _sendbirdService.SendAdminMessageAsync(customOffer.ChatSession.SendbirdChannelUrl,
+                    await _sendbirdService.SendAdminMessageAsync(channelUrl,
                         $"✅ Custom offer accepted for {customOffer.Service.ServiceName}. " +
                         $"Price: ₦{customOffer.Price:N2} (held in escrow). " +
                         $"Scheduled: {customOffer.ScheduledAt:yyyy-MM-dd HH:mm}.");
@@ -302,6 +358,8 @@ namespace AgricHub.BLL.Implementations
             }
         }
 
+        // ── Reject custom offer ────────────────────────────────────────────────
+
         public async Task<CustomOfferResponse> RejectCustomOfferAsync(Guid offerId, string reason)
         {
             var userId = GetUserId();
@@ -324,8 +382,15 @@ namespace AgricHub.BLL.Implementations
             _customOfferRepo.Update(customOffer);
             await _unitOfWork.SaveChangesAsync();
 
-            await _sendbirdService.SendAdminMessageAsync(customOffer.ChatSession.SendbirdChannelUrl,
-                $"Custom offer rejected for service: {customOffer.Service.ServiceName}. Reason: {reason}.");
+            // Ensure channel URL is valid before sending the rejection message
+            var channelUrl = await EnsureChannelAsync(customOffer.ChatSession);
+
+            try
+            {
+                await _sendbirdService.SendAdminMessageAsync(channelUrl,
+                    $"❌ Custom offer rejected for service: {customOffer.Service.ServiceName}. Reason: {reason}.");
+            }
+            catch { }
 
             try
             {
@@ -337,6 +402,8 @@ namespace AgricHub.BLL.Implementations
 
             return _mapper.Map<CustomOfferResponse>(customOffer);
         }
+
+        // ── Read ───────────────────────────────────────────────────────────────
 
         public async Task<IEnumerable<ChatSessionResponse>> GetMyChatsAsync()
         {
