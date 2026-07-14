@@ -41,8 +41,8 @@ namespace AgricHub.DAL.Seeders
                 // ── Booking ───────────────────────────────────────────────────
                 new() { Key="booking.maxAdvanceDays",      Value="60",  Category="booking", Label="Max advance booking (days)",     InputType="number", SortOrder=1 },
                 new() { Key="booking.cancellationHours",   Value="24",  Category="booking", Label="Cancellation window (hours)",    InputType="number", SortOrder=2 },
-                new() { Key="booking.noShowPenaltyPercent",Value="0",   Category="booking", Label="No-show penalty (%)",            InputType="number", SortOrder=3 },
-                new() { Key="booking.autoConfirm",         Value="true",Category="booking", Label="Auto-confirm bookings",          InputType="toggle", SortOrder=4 },
+                new() { Key="booking.noShowPenaltyPercent",Value="2",   Category="booking", Label="No-show penalty (%)",            InputType="number", SortOrder=3 },
+                new() { Key="booking.autoConfirm",         Value="false",Category="booking", Label="Auto-confirm bookings",         InputType="toggle", SortOrder=4 },
                 new() { Key="booking.requiresVerification",Value="true",Category="booking", Label="Require verified consultant",    InputType="toggle", SortOrder=5 },
 
                 // ── Integrations ──────────────────────────────────────────────

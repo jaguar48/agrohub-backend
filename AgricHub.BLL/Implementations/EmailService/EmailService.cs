@@ -45,6 +45,18 @@ namespace AgricHub.BLL.Implementations
         // ── Core send ──────────────────────────────────────────────────────────
         private async Task SendAsync(string toEmail, string toName, string subject, string htmlBody)
         {
+            // ── Global email kill switch (features.emailNotifications) ────────────
+            // Was seeded but never checked — every email template call below always
+            // fired regardless of this toggle. Now an admin can genuinely turn all
+            // outbound email off (e.g. during testing/migration) without touching code.
+            var emailEnabledRaw = await _settings.GetAsync("features.emailNotifications");
+            var emailEnabled = emailEnabledRaw == null || emailEnabledRaw == "true";
+            if (!emailEnabled)
+            {
+                _logger.LogInformation("[Email] Skipped (features.emailNotifications is off) — would have sent '{Subject}' to {Email}", subject, toEmail);
+                return;
+            }
+
             var sgKey = await GetAsync("email.sendgridKey", "SendGrid:ApiKey");
             var senderName = await GetAsync("email.senderName", "EmailSettings:SenderName");
             var senderEmail = await GetAsync("email.senderEmail", "EmailSettings:SenderEmail");
@@ -194,5 +206,24 @@ namespace AgricHub.BLL.Implementations
                 <p>Click below to reset your password (expires in 24 hours):</p>
                 <p><a href='{resetUrl}' style='background:#2d6a4f;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600'>Reset password</a></p>
                 <p>— The AgricHub Team</p>");
+
+        /// <summary>
+        /// One flexible branded template used for every event that doesn't
+        /// warrant its own bespoke design (cancellations, disputes, payouts,
+        /// reschedules, pitches etc.) — avoids maintaining a dozen near-identical
+        /// HTML templates for events that just need "here's what happened, here's
+        /// where to go" messaging.
+        /// </summary>
+        public Task SendGenericNotificationAsync(
+            string toEmail, string name, string subject, string headline, string bodyHtml,
+            string? ctaText = null, string? ctaUrl = null) =>
+            SendAsync(toEmail, name, subject, $@"
+                <p>Hi {name},</p>
+                <p style='font-size:16px;font-weight:600;color:#1a1a1a;margin:16px 0 8px'>{headline}</p>
+                <div style='color:#333;line-height:1.6'>{bodyHtml}</div>
+                {(ctaText != null && ctaUrl != null
+                    ? $"<p style='margin-top:20px'><a href='{ctaUrl}' style='background:#2d6a4f;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600'>{ctaText}</a></p>"
+                    : "")}
+                <p style='margin-top:24px'>— The AgricHub Team</p>");
     }
 }

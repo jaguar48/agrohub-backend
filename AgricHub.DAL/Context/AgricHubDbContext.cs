@@ -20,13 +20,13 @@ namespace AgricHub.DAL.Context
 
             modelBuilder.Entity<Consultation>()
                 .HasOne(c => c.Customer)
-                .WithMany()
+                .WithMany(cust => cust.Consultations)
                 .HasForeignKey(c => c.CustomerId)
                 .OnDelete(DeleteBehavior.Restrict);
 
             modelBuilder.Entity<Consultation>()
                 .HasOne(c => c.Consultant)
-                .WithMany()
+                .WithMany(con => con.Consultations)
                 .HasForeignKey(c => c.ConsultantId)
                 .OnDelete(DeleteBehavior.Restrict);
 
@@ -96,15 +96,15 @@ namespace AgricHub.DAL.Context
 
             modelBuilder.Entity<Wallet>()
                 .HasOne(w => w.Customer)
-                .WithMany()
-                .HasForeignKey(w => w.CustomerId)
+                .WithOne(cust => cust.Wallet)
+                .HasForeignKey<Wallet>(w => w.CustomerId)
                 .IsRequired(false)
                 .OnDelete(DeleteBehavior.Restrict);
 
             modelBuilder.Entity<Wallet>()
                 .HasOne(w => w.Consultant)
-                .WithMany()
-                .HasForeignKey(w => w.ConsultantId)
+                .WithOne(con => con.Wallet)
+                .HasForeignKey<Wallet>(w => w.ConsultantId)
                 .IsRequired(false)
                 .OnDelete(DeleteBehavior.Restrict);
 
@@ -183,7 +183,7 @@ namespace AgricHub.DAL.Context
 
             modelBuilder.Entity<Business>()
                 .HasOne(b => b.Consultant)
-                .WithMany()
+                .WithMany(c => c.Businesses)
                 .HasForeignKey(b => b.ConsultantId)
                 .OnDelete(DeleteBehavior.Restrict);
 
@@ -216,6 +216,28 @@ namespace AgricHub.DAL.Context
             modelBuilder.Entity<Consultation>()
                 .Property(c => c.CustomPrice)
                 .HasColumnType("decimal(18,2)");
+
+            modelBuilder.Entity<Consultant>()
+                .Property(c => c.HourlyRate)
+                .HasColumnType("decimal(18,2)");
+
+            modelBuilder.Entity<OfferPost>()
+                .Property(op => op.Budget)
+                .HasColumnType("decimal(18,2)");
+
+            // ============= SIGNALR CHAT / PRESENCE =============
+
+            // UserId doesn't match EF's Id/{Entity}Id key-discovery convention,
+            // so the PK must be declared explicitly or migrations will fail with:
+            // "The entity type 'UserPresence' requires a primary key to be defined."
+            modelBuilder.Entity<UserPresence>()
+                .HasKey(up => up.UserId);
+
+            modelBuilder.Entity<ChatMessage>()
+                .HasIndex(cm => cm.ChannelUrl);
+
+            modelBuilder.Entity<ChatMessage>()
+                .HasIndex(cm => cm.CreatedAt);
         }
 
         // ============= DBSETS =============
@@ -236,5 +258,9 @@ namespace AgricHub.DAL.Context
         public DbSet<BusinessVerification> BusinessVerifications { get; set; }  // ← ADDED
                                                                                 // In AgricHubDbContext.cs — add this DbSet:
         public DbSet<PlatformSetting> PlatformSettings { get; set; }
+        public DbSet<ChatMessage> ChatMessages { get; set; }          // SignalR chat storage
+        public DbSet<UserPresence> UserPresence { get; set; }         // SignalR presence
+        public DbSet<OfferPost> OfferPosts { get; set; }               // Fiverr-style buyer requests
+
     }
 }

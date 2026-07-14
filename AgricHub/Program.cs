@@ -1,6 +1,7 @@
 ﻿// AgricHub.API/Program.cs
 
 using AgricHub.API.Extension;
+using AgricHub.API.Middleware;
 using AgricHub.BLL.Implementations.BusinessServices;
 using AgricHub.Contracts;
 using AgricHub.DAL;
@@ -48,7 +49,8 @@ builder.Services.ConfigureJWT(builder.Configuration);
 builder.Services.ConfigureSqlContext(builder.Configuration);
 builder.Services.AddScoped<ValidationFilterAttribute>();
 builder.Services.AddCors(o => o.AddPolicy("Angular",
-    p => p.WithOrigins("http://localhost:4200").AllowAnyHeader().AllowAnyMethod()));
+    p => p.WithOrigins("http://localhost:4200").AllowAnyHeader().AllowAnyMethod()
+          .AllowCredentials()));   // SignalR requires credentials
 builder.Services.AddControllers()
     .AddApplicationPart(typeof(AgricHub.Presentation.AssemblyReference).Assembly);
 builder.Services.AddSwaggerGen(c =>
@@ -120,8 +122,10 @@ app.UseForwardedHeaders(new ForwardedHeadersOptions
 });
 app.UseAuthentication();
 /* app.UseHttpsRedirection(); */
+app.UsePlatformSettingsGate();   // maintenanceMode + publicRegistration gates
 app.UseAuthorization();
 app.MapControllers();
+app.MapHub<AgricHub.BLL.Hubs.ChatHub>("/hubs/chat");
 app.UseSwagger();
 app.UseSwaggerUI(c =>
 {

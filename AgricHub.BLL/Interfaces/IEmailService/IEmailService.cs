@@ -15,6 +15,7 @@ namespace AgricHub.BLL.Interfaces
         Task SendBookingRequestAsync(string toEmail, string consultantName, string customerName, string serviceName, DateTime scheduledAt);
         Task SendWalletTopUpAsync(string toEmail, string name, decimal amount, decimal newBalance);
         Task SendPasswordResetAsync(string toEmail, string name, string resetUrl);
+        Task SendGenericNotificationAsync(string toEmail, string name, string subject, string headline, string bodyHtml, string? ctaText = null, string? ctaUrl = null);
     }
 }
 

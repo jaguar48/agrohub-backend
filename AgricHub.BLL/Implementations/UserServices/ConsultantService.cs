@@ -81,6 +81,11 @@ namespace AgricHub.BLL.Implementations.UserServices.UserServices
                 await _unitOfWork.SaveChangesAsync();
                 await _unitOfWork.CommitTransactionAsync();
 
+                // Fire after commit — a failed email send should never roll back
+                // an otherwise-successful registration.
+                try { await _authService.SendVerificationEmail(user.Email, user.VerificationToken); }
+                catch { /* registration already succeeded; email failure is non-fatal */ }
+
                 return JsonConvert.SerializeObject(new
                 {
                     success = true,

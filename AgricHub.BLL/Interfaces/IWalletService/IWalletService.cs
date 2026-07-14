@@ -9,5 +9,8 @@ namespace AgricHub.BLL.Interfaces.IWalletService
         Task<WalletTopUpResponse> TopUpWalletAsync(decimal amount);
         Task<WalletTopUpResponse> VerifyPaymentAsync(string reference);
         Task RequestPayoutAsync(decimal amount);
+        Task<IEnumerable<object>> GetPendingPayoutsAsync();
+        Task ApprovePayoutAsync(int transactionId);
+        Task RejectPayoutAsync(int transactionId, string reason);
     }
 }

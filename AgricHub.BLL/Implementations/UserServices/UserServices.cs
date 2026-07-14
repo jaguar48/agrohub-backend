@@ -55,6 +55,12 @@ namespace AgricHub.BLL.Implementations.UserServices
                 throw new InvalidOperationException($"Failed to create user:\n{errMsg}");
             }
 
+            // Was never set anywhere — AuthService.VerifyUser compares against
+            // user.VerificationToken, but nothing generated one, so a clicked
+            // verification link could never succeed even if the email had sent.
+            user.VerificationToken = Guid.NewGuid().ToString("N");
+            await _userManager.UpdateAsync(user);
+
             return user;
 
         }

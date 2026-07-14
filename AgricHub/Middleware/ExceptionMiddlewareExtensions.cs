@@ -2,7 +2,7 @@
 using Microsoft.AspNetCore.Diagnostics;
 using System.Net;
 
-namespace AgricHub.API.Extension
+namespace AgricHub.API.Middleware
 {
     public static class ExceptionMiddlewareExtensions
     {

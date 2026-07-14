@@ -49,13 +49,19 @@ namespace AgricHub.DAL.Entities
         // Custom offer properties
         public bool IsCustomOffer { get; set; }
 
+        // Set when this booking came from winning a pitch on a customer's posted
+        // request (Fiverr-style flow), as opposed to a consultant directly
+        // offering a custom price in an existing chat. Both set IsCustomOffer=true,
+        // but this distinguishes which of the two custom-offer flows it came from.
+        public Guid? OfferPostId { get; set; }
+
         public DateTime? DisputeRaisedAt { get; set; }
         public string? DisputeReason { get; set; }
         public string? DisputeStatus { get; set; }   // "Open" | "ResolvedReleased" | "ResolvedRefunded"
 
         public decimal? CustomPrice { get; set; }
         public int? CustomDurationMinutes { get; set; }
-      
+
         public string? Notes { get; set; }
         public DateTime? RescheduleRequestedAt { get; set; }
         public string? RescheduleRequestReason { get; set; }

@@ -25,6 +25,7 @@ namespace AgricHub.BLL.Implementations.UserServices
         private ApplicationUser? _user;
         private readonly IUnitOfWork _unitOfWork;
         private readonly IEmailService _emailService;
+        private readonly IPlatformSettingsService _settings;
         private readonly IRepository<Consultant> _consultantRepo;
         private readonly IRepository<Customer> _customerRepo;
         private readonly IRepository<Wallet> _walletRepo;
@@ -33,11 +34,13 @@ namespace AgricHub.BLL.Implementations.UserServices
             UserManager<ApplicationUser> userManager,
             IUnitOfWork unitOfWork,
             IConfiguration configuration,
-            IEmailService emailService)
+            IEmailService emailService,
+            IPlatformSettingsService settings)
         {
             _userManager    = userManager;
             _unitOfWork     = unitOfWork;
             _emailService   = emailService;
+            _settings       = settings;
             _configuration  = configuration;
             _consultantRepo = _unitOfWork.GetRepository<Consultant>();
             _customerRepo   = _unitOfWork.GetRepository<Customer>();
@@ -61,17 +64,39 @@ namespace AgricHub.BLL.Implementations.UserServices
 
         public async Task<bool> SendVerificationEmail(string email, string verificationToken)
         {
-            var apiKey = "";
-            var client = new SendGridClient(apiKey);
-            var from = new EmailAddress("");
-            var to = new EmailAddress("");
-            var subject = "Account Verification";
-            var verificationUrl = $"{_configuration["AppBaseUrl"]}/marketplace/authentication/verify?email={HttpUtility.UrlEncode(email)}&verificationToken={verificationToken}";
-            var msg = MailHelper.CreateSingleEmail(from, to, subject,
-                $"Please click the following link to verify your account: {verificationUrl}",
-                $"<p>Please click the following link to verify your account: <a href='{verificationUrl}'>{verificationUrl}</a></p>");
-            var response = await client.SendEmailAsync(msg);
-            return response.IsSuccessStatusCode;
+            // Was calling SendGridClient directly with a hardcoded empty apiKey,
+            // empty "from" address, and — critically — an empty "to" address
+            // (never set to the actual `email` parameter). Completely broken,
+            // and nothing in the codebase ever called this anyway, so the bug
+            // was never noticed. Now routes through the properly-configured
+            // EmailService (SendGrid → SMTP fallback, settings-driven).
+            var platformUrl = await GetPlatformUrlAsync();
+            // Must match src/app/app.routes.ts: { path: 'auth/verify', ... }
+            // and verify-email.component.ts's expected query params (email, token) —
+            // NOT "authentication/verify" or "verificationToken" as the old dead code had it.
+            var verificationUrl =
+                $"{platformUrl}/auth/verify?email={HttpUtility.UrlEncode(email)}&token={verificationToken}";
+
+            var user = await _userManager.FindByEmailAsync(email);
+            var name = user != null ? $"{user.FirstName} {user.LastName}".Trim() : email;
+
+            try
+            {
+                await _emailService.SendVerificationEmailAsync(email, name, verificationUrl);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>Reads platform.url from admin settings, same pattern WalletService
+        /// uses for the Paystack callback — falls back to localhost only if unset.</summary>
+        private async Task<string> GetPlatformUrlAsync()
+        {
+            var raw = await _settings.GetAsync("platform.url");
+            return string.IsNullOrWhiteSpace(raw) ? "http://localhost:4200" : raw.TrimEnd('/');
         }
 
         public async Task<ApplicationUser> VerifyUser(string email, string verificationToken)

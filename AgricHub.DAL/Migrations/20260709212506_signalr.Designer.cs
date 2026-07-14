@@ -4,6 +4,7 @@ using AgricHub.DAL.Context;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AgricHub.DAL.Migrations
 {
     [DbContext(typeof(AgricHubDbContext))]
-    partial class AgricHubDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260709212506_signalr")]
+    partial class signalr
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -132,6 +135,9 @@ namespace AgricHub.DAL.Migrations
                     b.Property<int>("ConsultantId")
                         .HasColumnType("int");
 
+                    b.Property<int?>("ConsultantId1")
+                        .HasColumnType("int");
+
                     b.Property<DateTime>("DateCreated")
                         .HasColumnType("datetime2");
 
@@ -150,6 +156,8 @@ namespace AgricHub.DAL.Migrations
                     b.HasIndex("CategoryId");
 
                     b.HasIndex("ConsultantId");
+
+                    b.HasIndex("ConsultantId1");
 
                     b.ToTable("Businesses");
                 });
@@ -228,6 +236,9 @@ namespace AgricHub.DAL.Migrations
                     b.Property<int>("ConsultantId")
                         .HasColumnType("int");
 
+                    b.Property<int?>("ConsultantId1")
+                        .HasColumnType("int");
+
                     b.Property<bool>("ConsultantNoShowReported")
                         .HasColumnType("bit");
 
@@ -241,6 +252,9 @@ namespace AgricHub.DAL.Migrations
                         .HasColumnType("decimal(18,2)");
 
                     b.Property<int>("CustomerId")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("CustomerId1")
                         .HasColumnType("int");
 
                     b.Property<int?>("CustomerNoShowGraceHours")
@@ -285,9 +299,6 @@ namespace AgricHub.DAL.Migrations
                     b.Property<string>("Notes")
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<Guid?>("OfferPostId")
-                        .HasColumnType("uniqueidentifier");
-
                     b.Property<DateTime?>("OverdueReviewReminderSentAt")
                         .HasColumnType("datetime2");
 
@@ -330,7 +341,11 @@ namespace AgricHub.DAL.Migrations
 
                     b.HasIndex("ConsultantId");
 
+                    b.HasIndex("ConsultantId1");
+
                     b.HasIndex("CustomerId");
+
+                    b.HasIndex("CustomerId1");
 
                     b.HasIndex("ServiceId");
 
@@ -351,9 +366,6 @@ namespace AgricHub.DAL.Migrations
                     b.Property<Guid>("ChatSessionId")
                         .HasColumnType("uniqueidentifier");
 
-                    b.Property<int>("ConsultantId")
-                        .HasColumnType("int");
-
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
 
@@ -366,18 +378,6 @@ namespace AgricHub.DAL.Migrations
 
                     b.Property<bool>("IncludesOnsiteVisit")
                         .HasColumnType("bit");
-
-                    b.Property<Guid?>("OfferPostId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("PitchMessage")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("PortfolioFileName")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("PortfolioUrl")
-                        .HasColumnType("nvarchar(max)");
 
                     b.Property<decimal>("Price")
                         .HasColumnType("decimal(18,2)");
@@ -395,8 +395,6 @@ namespace AgricHub.DAL.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("ChatSessionId");
-
-                    b.HasIndex("OfferPostId");
 
                     b.HasIndex("ServiceId");
 
@@ -750,51 +748,6 @@ namespace AgricHub.DAL.Migrations
                     b.ToTable("UserPresence");
                 });
 
-            modelBuilder.Entity("AgricHub.DAL.Entities.OfferPost", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<decimal?>("Budget")
-                        .HasColumnType("decimal(18,2)");
-
-                    b.Property<int?>("CategoryId")
-                        .HasColumnType("int");
-
-                    b.Property<DateTime?>("ClosedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<int>("CustomerId")
-                        .HasColumnType("int");
-
-                    b.Property<string>("Description")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<DateTime?>("PreferredAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("Title")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CategoryId");
-
-                    b.HasIndex("CustomerId");
-
-                    b.ToTable("OfferPosts");
-                });
-
             modelBuilder.Entity("AgricHub.DAL.Entities.PendingTransaction", b =>
                 {
                     b.Property<Guid>("Id")
@@ -976,7 +929,13 @@ namespace AgricHub.DAL.Migrations
                     b.Property<int?>("ConsultantId")
                         .HasColumnType("int");
 
+                    b.Property<int?>("ConsultantId1")
+                        .HasColumnType("int");
+
                     b.Property<int?>("CustomerId")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("CustomerId1")
                         .HasColumnType("int");
 
                     b.Property<bool>("IsActive")
@@ -992,13 +951,17 @@ namespace AgricHub.DAL.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("ConsultantId")
-                        .IsUnique()
-                        .HasFilter("[ConsultantId] IS NOT NULL");
+                    b.HasIndex("ConsultantId");
 
-                    b.HasIndex("CustomerId")
+                    b.HasIndex("ConsultantId1")
                         .IsUnique()
-                        .HasFilter("[CustomerId] IS NOT NULL");
+                        .HasFilter("[ConsultantId1] IS NOT NULL");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("CustomerId1")
+                        .IsUnique()
+                        .HasFilter("[CustomerId1] IS NOT NULL");
 
                     b.ToTable("Wallets", t =>
                         {
@@ -1189,10 +1152,14 @@ namespace AgricHub.DAL.Migrations
                         .HasForeignKey("CategoryId");
 
                     b.HasOne("AgricHub.DAL.Entities.Models.Consultant", "Consultant")
-                        .WithMany("Businesses")
+                        .WithMany()
                         .HasForeignKey("ConsultantId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.HasOne("AgricHub.DAL.Entities.Models.Consultant", null)
+                        .WithMany("Businesses")
+                        .HasForeignKey("ConsultantId1");
 
                     b.Navigation("Consultant");
                 });
@@ -1226,16 +1193,24 @@ namespace AgricHub.DAL.Migrations
             modelBuilder.Entity("AgricHub.DAL.Entities.Consultation", b =>
                 {
                     b.HasOne("AgricHub.DAL.Entities.Models.Consultant", "Consultant")
-                        .WithMany("Consultations")
+                        .WithMany()
                         .HasForeignKey("ConsultantId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("AgricHub.DAL.Entities.Models.Customer", "Customer")
+                    b.HasOne("AgricHub.DAL.Entities.Models.Consultant", null)
                         .WithMany("Consultations")
+                        .HasForeignKey("ConsultantId1");
+
+                    b.HasOne("AgricHub.DAL.Entities.Models.Customer", "Customer")
+                        .WithMany()
                         .HasForeignKey("CustomerId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.HasOne("AgricHub.DAL.Entities.Models.Customer", null)
+                        .WithMany("Consultations")
+                        .HasForeignKey("CustomerId1");
 
                     b.HasOne("AgricHub.DAL.Entities.Service", "Service")
                         .WithMany()
@@ -1264,10 +1239,6 @@ namespace AgricHub.DAL.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("AgricHub.DAL.Entities.OfferPost", "OfferPost")
-                        .WithMany()
-                        .HasForeignKey("OfferPostId");
-
                     b.HasOne("AgricHub.DAL.Entities.Service", "Service")
                         .WithMany()
                         .HasForeignKey("ServiceId")
@@ -1275,8 +1246,6 @@ namespace AgricHub.DAL.Migrations
                         .IsRequired();
 
                     b.Navigation("ChatSession");
-
-                    b.Navigation("OfferPost");
 
                     b.Navigation("Service");
                 });
@@ -1288,23 +1257,6 @@ namespace AgricHub.DAL.Migrations
                         .HasForeignKey("UserId");
 
                     b.Navigation("User");
-                });
-
-            modelBuilder.Entity("AgricHub.DAL.Entities.OfferPost", b =>
-                {
-                    b.HasOne("AgricHub.DAL.Entities.Category", "Category")
-                        .WithMany()
-                        .HasForeignKey("CategoryId");
-
-                    b.HasOne("AgricHub.DAL.Entities.Models.Customer", "Customer")
-                        .WithMany()
-                        .HasForeignKey("CustomerId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Category");
-
-                    b.Navigation("Customer");
                 });
 
             modelBuilder.Entity("AgricHub.DAL.Entities.PendingTransaction", b =>
@@ -1393,14 +1345,22 @@ namespace AgricHub.DAL.Migrations
             modelBuilder.Entity("AgricHub.DAL.Entities.Wallet", b =>
                 {
                     b.HasOne("AgricHub.DAL.Entities.Models.Consultant", "Consultant")
-                        .WithOne("Wallet")
-                        .HasForeignKey("AgricHub.DAL.Entities.Wallet", "ConsultantId")
+                        .WithMany()
+                        .HasForeignKey("ConsultantId")
                         .OnDelete(DeleteBehavior.Restrict);
 
-                    b.HasOne("AgricHub.DAL.Entities.Models.Customer", "Customer")
+                    b.HasOne("AgricHub.DAL.Entities.Models.Consultant", null)
                         .WithOne("Wallet")
-                        .HasForeignKey("AgricHub.DAL.Entities.Wallet", "CustomerId")
+                        .HasForeignKey("AgricHub.DAL.Entities.Wallet", "ConsultantId1");
+
+                    b.HasOne("AgricHub.DAL.Entities.Models.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
                         .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("AgricHub.DAL.Entities.Models.Customer", null)
+                        .WithOne("Wallet")
+                        .HasForeignKey("AgricHub.DAL.Entities.Wallet", "CustomerId1");
 
                     b.Navigation("Consultant");
 

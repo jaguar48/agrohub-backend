@@ -14,6 +14,9 @@
 		<None Remove="Implementations\ShopServices\**" />
 	</ItemGroup>
 	<ItemGroup>
+		<FrameworkReference Include="Microsoft.AspNetCore.App" />
+	</ItemGroup>
+	<ItemGroup>
 		<PackageReference Include="AutoMapper" Version="12.0.1" />
 		<PackageReference Include="Cloudinary" Version="0.0.5" />
 		<PackageReference Include="CloudinaryDotNet" Version="1.29.1" />

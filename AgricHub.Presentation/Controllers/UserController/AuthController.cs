@@ -54,6 +54,25 @@ namespace AgricHub.Presentation.Controllers.UserController
                 return BadRequest(new { message = e.Message });
             }
         }
+
+        // Was completely missing — the frontend (verify-email.component.ts) has
+        // been calling GET {base}/verify?email=X&token=Y since it was built, but
+        // no matching endpoint ever existed. AuthService.VerifyUser was already
+        // written and ready, just never wired to any route.
+        [HttpGet("verify")]
+        [AllowAnonymous]
+        [SwaggerOperation(Summary = "Confirm a user's email via the link sent at registration")]
+        public async Task<IActionResult> VerifyEmail([FromQuery] string email, [FromQuery] string token)
+        {
+            if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(token))
+                return BadRequest(new { success = false, message = "Missing email or token." });
+
+            var user = await _authentication.VerifyUser(email, token);
+            if (user == null)
+                return BadRequest(new { success = false, message = "Invalid or expired verification link." });
+
+            return Ok(new { success = true, message = "Email verified successfully." });
+        }
     }
 
     public record GoogleAuthRequest(string Credential, string? Role = null);

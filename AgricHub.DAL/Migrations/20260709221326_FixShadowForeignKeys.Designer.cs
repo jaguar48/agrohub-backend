@@ -4,6 +4,7 @@ using AgricHub.DAL.Context;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AgricHub.DAL.Migrations
 {
     [DbContext(typeof(AgricHubDbContext))]
-    partial class AgricHubDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260709221326_FixShadowForeignKeys")]
+    partial class FixShadowForeignKeys
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -285,9 +288,6 @@ namespace AgricHub.DAL.Migrations
                     b.Property<string>("Notes")
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<Guid?>("OfferPostId")
-                        .HasColumnType("uniqueidentifier");
-
                     b.Property<DateTime?>("OverdueReviewReminderSentAt")
                         .HasColumnType("datetime2");
 
@@ -351,9 +351,6 @@ namespace AgricHub.DAL.Migrations
                     b.Property<Guid>("ChatSessionId")
                         .HasColumnType("uniqueidentifier");
 
-                    b.Property<int>("ConsultantId")
-                        .HasColumnType("int");
-
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
 
@@ -366,18 +363,6 @@ namespace AgricHub.DAL.Migrations
 
                     b.Property<bool>("IncludesOnsiteVisit")
                         .HasColumnType("bit");
-
-                    b.Property<Guid?>("OfferPostId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("PitchMessage")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("PortfolioFileName")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("PortfolioUrl")
-                        .HasColumnType("nvarchar(max)");
 
                     b.Property<decimal>("Price")
                         .HasColumnType("decimal(18,2)");
@@ -395,8 +380,6 @@ namespace AgricHub.DAL.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("ChatSessionId");
-
-                    b.HasIndex("OfferPostId");
 
                     b.HasIndex("ServiceId");
 
@@ -748,51 +731,6 @@ namespace AgricHub.DAL.Migrations
                     b.HasKey("UserId");
 
                     b.ToTable("UserPresence");
-                });
-
-            modelBuilder.Entity("AgricHub.DAL.Entities.OfferPost", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<decimal?>("Budget")
-                        .HasColumnType("decimal(18,2)");
-
-                    b.Property<int?>("CategoryId")
-                        .HasColumnType("int");
-
-                    b.Property<DateTime?>("ClosedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<int>("CustomerId")
-                        .HasColumnType("int");
-
-                    b.Property<string>("Description")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<DateTime?>("PreferredAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("Title")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CategoryId");
-
-                    b.HasIndex("CustomerId");
-
-                    b.ToTable("OfferPosts");
                 });
 
             modelBuilder.Entity("AgricHub.DAL.Entities.PendingTransaction", b =>
@@ -1264,10 +1202,6 @@ namespace AgricHub.DAL.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("AgricHub.DAL.Entities.OfferPost", "OfferPost")
-                        .WithMany()
-                        .HasForeignKey("OfferPostId");
-
                     b.HasOne("AgricHub.DAL.Entities.Service", "Service")
                         .WithMany()
                         .HasForeignKey("ServiceId")
@@ -1275,8 +1209,6 @@ namespace AgricHub.DAL.Migrations
                         .IsRequired();
 
                     b.Navigation("ChatSession");
-
-                    b.Navigation("OfferPost");
 
                     b.Navigation("Service");
                 });
@@ -1288,23 +1220,6 @@ namespace AgricHub.DAL.Migrations
                         .HasForeignKey("UserId");
 
                     b.Navigation("User");
-                });
-
-            modelBuilder.Entity("AgricHub.DAL.Entities.OfferPost", b =>
-                {
-                    b.HasOne("AgricHub.DAL.Entities.Category", "Category")
-                        .WithMany()
-                        .HasForeignKey("CategoryId");
-
-                    b.HasOne("AgricHub.DAL.Entities.Models.Customer", "Customer")
-                        .WithMany()
-                        .HasForeignKey("CustomerId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Category");
-
-                    b.Navigation("Customer");
                 });
 
             modelBuilder.Entity("AgricHub.DAL.Entities.PendingTransaction", b =>

@@ -97,6 +97,19 @@ namespace AgricHub.API.Extension
                     ValidAudience            = jwtSettings["validAudience"],
                     IssuerSigningKey         = new SymmetricSecurityKey(secretKey)
                 };
+
+                // SignalR sends the JWT as ?access_token= on the WebSocket handshake
+                options.Events = new JwtBearerEvents
+                {
+                    OnMessageReceived = context =>
+                    {
+                        var accessToken = context.Request.Query["access_token"];
+                        var path = context.HttpContext.Request.Path;
+                        if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs/chat"))
+                            context.Token = accessToken;
+                        return Task.CompletedTask;
+                    }
+                };
             });
         }
 
@@ -119,11 +132,18 @@ namespace AgricHub.API.Extension
 
             // ── Chat ───────────────────────────────────────────────────────────
             services.AddScoped<IChatService, ChatService>();
+            services.AddScoped<IOfferPostService, OfferPostService>();  // Fiverr-style buyer-request pitches
 
             // ── Sendbird — TYPED HttpClient (replaces AddScoped<ISendbirdService>)
             // Using IHttpClientFactory prevents socket exhaustion caused by
             // new HttpClient() per request (which was causing the 100-second hangs
             // on GetNotificationHistoryAsync under concurrent load).
+            // ── SignalR replaces Sendbird (same interface, zero caller changes) ──
+            // Revert to Sendbird: comment the next line, uncomment the AddHttpClient block.
+            services.AddScoped<ISendbirdService, SignalRChatService>();
+            services.AddSignalR();
+
+            /* SENDBIRD (kept for 1-line revert)
             services.AddHttpClient<ISendbirdService, SendbirdService>(client =>
             {
                 // Short global timeout — individual calls can be cancelled sooner
@@ -131,6 +151,7 @@ namespace AgricHub.API.Extension
                 client.Timeout = TimeSpan.FromSeconds(15);
             })
             .SetHandlerLifetime(TimeSpan.FromMinutes(5));   // recycle connections every 5min
+            */
 
             // ── Video (Daily.co) ───────────────────────────────────────────────
             services.AddHttpClient();
@@ -155,12 +176,14 @@ namespace AgricHub.API.Extension
             // ── Email (SendGrid primary → SMTP fallback) ───────────────────────
             services.AddScoped<IEmailService, EmailService>();
 
-            // ── Storage (Cloudinary if configured → local fallback) ────────────
-            var cloudName = configuration["Cloudinary:CloudName"];
-            if (!string.IsNullOrEmpty(cloudName) && cloudName != "your-cloud-name")
-                services.AddScoped<IStorageService, CloudinaryStorageService>();
-            else
-                services.AddScoped<IStorageService, LocalStorageService>();
+            // ── Storage — routed live by features.cloudStorage, not fixed at
+            // startup (see StorageServiceRouter for why). Both concrete
+            // implementations register under their own type so the router can
+            // resolve either at call time; IStorageService itself now always
+            // points at the router. ──
+            services.AddScoped<CloudinaryStorageService>();
+            services.AddScoped<LocalStorageService>();
+            services.AddScoped<IStorageService, StorageServiceRouter>();
 
             // ── Platform Settings (cached key-value config) ────────────────────
             services.AddMemoryCache();

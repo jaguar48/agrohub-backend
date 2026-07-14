@@ -49,7 +49,13 @@ namespace AgricHub.BLL.Implementations.PaystackService
                 {
                     email,
                     amount = (int)(amount * 100),
-                    currency = "USD",
+                    // FIX: was "USD" — every other part of this app (wallet balance,
+                    // displayed prices, kobo-subunit conversion above) treats this
+                    // amount as Naira. Sending USD here meant either Paystack silently
+                    // charged a completely different amount than what was displayed
+                    // to the customer, or rejected the transaction depending on the
+                    // merchant account's configured settlement currency.
+                    currency = "NGN",
                     callback_url = callbackUrl,
                     metadata = new
                     {

@@ -1,4 +1,4 @@
-﻿namespace AgricHub.API.Extension
+﻿namespace AgricHub.API.Middleware
 {
    
     /// <summary>

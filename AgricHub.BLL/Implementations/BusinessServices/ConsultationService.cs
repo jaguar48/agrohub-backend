@@ -20,6 +20,7 @@
 //      the existing "never crash on Sendbird failure" philosophy already
 //      used throughout this file's try/catch-less inline awaits.
 
+using AgricHub.BLL.Interfaces;
 using AgricHub.BLL.Interfaces.ChatServices;
 using AgricHub.BLL.Interfaces.IBusinessServices;
 using AgricHub.Contracts;
@@ -57,8 +58,9 @@ namespace AgricHub.BLL.Implementations.BusinessServices
         private readonly IMapper _mapper;
         private readonly ILogger<ConsultationService> _logger;
         private readonly IServiceScopeFactory _scopeFactory;
+        private readonly IPlatformSettingsService _settings;
+        private readonly IEmailService _emailService;
 
-        private const decimal CustomerNoShowPayoutPercentage = 0.5m;
         private const int GracePeriodMinutes = 15;
         private const int CompletionApprovalGraceHours = 72; // 3 days — auto-release if customer doesn't review
 
@@ -69,7 +71,9 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             IWebHostEnvironment env,
             IMapper mapper,
             ILogger<ConsultationService> logger,
-            IServiceScopeFactory scopeFactory)
+            IServiceScopeFactory scopeFactory,
+            IPlatformSettingsService settings,
+            IEmailService emailService)
         {
             _unitOfWork             = unitOfWork;
             _consultationRepo       = _unitOfWork.GetRepository<Consultation>();
@@ -89,6 +93,42 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             _mapper                 = mapper;
             _logger                 = logger;
             _scopeFactory           = scopeFactory;
+            _settings               = settings;
+            _emailService           = emailService;
+        }
+
+        /// <summary>
+        /// Deducts the admin-configured platform fee from a gross escrow amount
+        /// before it's credited to a consultant's wallet. Previously
+        /// finance.platformFeePercent existed only as an unused seeded setting —
+        /// consultants received 100% of every escrowed amount with no commission
+        /// taken anywhere in the codebase. This is now the single choke point
+        /// all four payout-release paths run through (approval, auto-release ×2,
+        /// dispute resolution), so the fee is applied consistently everywhere
+        /// money actually leaves escrow into a consultant's wallet.
+        /// </summary>
+        private async Task<decimal> ApplyPlatformFeeAsync(decimal grossAmount)
+        {
+            var feeRaw = await _settings.GetAsync("finance.platformFeePercent");
+            if (!decimal.TryParse(feeRaw, out var feePercent) || feePercent <= 0) return grossAmount;
+            var fee = grossAmount * (feePercent / 100m);
+            return grossAmount - fee;
+        }
+
+        /// <summary>
+        /// When a CUSTOMER no-shows, this is the percentage of the total agreed
+        /// price the consultant keeps as compensation (the rest is refunded to
+        /// the customer). Was hardcoded at 50% (CustomerNoShowPayoutPercentage);
+        /// now driven by booking.noShowPenaltyPercent, decided at 2% — consultant
+        /// keeps 2%, customer gets 98% refunded. Falls back to 2% if the setting
+        /// is missing or unparseable, matching the seeded default.
+        /// </summary>
+        private async Task<decimal> GetNoShowConsultantPayoutPercentAsync()
+        {
+            var raw = await _settings.GetAsync("booking.noShowPenaltyPercent");
+            if (decimal.TryParse(raw, out var percent) && percent >= 0 && percent <= 100)
+                return percent / 100m;
+            return 0.02m; // fallback matches the seeded default of 2%
         }
 
         private string GetUserId()
@@ -182,6 +222,64 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             });
         }
 
+        /// <summary>
+        /// Fires a branded email alongside the in-app notification for the same
+        /// event, using the same fire-and-forget scoped pattern as FireNotification
+        /// (a slow/failed SMTP send should never block or fail the business
+        /// action that triggered it). EmailService itself already respects the
+        /// features.emailNotifications kill switch, so no need to check it here.
+        /// </summary>
+        private void FireEmail(string toEmail, string name, string subject, string headline, string bodyHtml,
+            string? ctaText = null, string? ctaUrl = null)
+        {
+            if (string.IsNullOrWhiteSpace(toEmail)) return;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    using var scope = _scopeFactory.CreateScope();
+                    var email = scope.ServiceProvider.GetRequiredService<IEmailService>();
+                    await email.SendGenericNotificationAsync(toEmail, name, subject, headline, bodyHtml, ctaText, ctaUrl);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[Email] Fire-and-forget email failed for {Email}, subject={Subject}", toEmail, subject);
+                }
+            });
+        }
+
+        /// <summary>Bespoke-template fire-and-forget wrappers — keep their nicer
+        /// dedicated design instead of falling back to the generic template.</summary>
+        private void FireBookingRequestEmail(string toEmail, string consultantName, string customerName, string serviceName, DateTime scheduledAt)
+        {
+            if (string.IsNullOrWhiteSpace(toEmail)) return;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    using var scope = _scopeFactory.CreateScope();
+                    var email = scope.ServiceProvider.GetRequiredService<IEmailService>();
+                    await email.SendBookingRequestAsync(toEmail, consultantName, customerName, serviceName, scheduledAt);
+                }
+                catch (Exception ex) { _logger.LogError(ex, "[Email] Booking request email failed for {Email}", toEmail); }
+            });
+        }
+
+        private void FireBookingConfirmedEmail(string toEmail, string name, string serviceName, string consultantName, DateTime scheduledAt, decimal amount)
+        {
+            if (string.IsNullOrWhiteSpace(toEmail)) return;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    using var scope = _scopeFactory.CreateScope();
+                    var email = scope.ServiceProvider.GetRequiredService<IEmailService>();
+                    await email.SendBookingConfirmedAsync(toEmail, name, serviceName, consultantName, scheduledAt, amount);
+                }
+                catch (Exception ex) { _logger.LogError(ex, "[Email] Booking confirmed email failed for {Email}", toEmail); }
+            });
+        }
+
         // ── Book ────────────────────────────────────────────────────────────────
 
         public async Task<ConsultationResponse> BookConsultationAsync(ConsultationBookingRequest dto)
@@ -202,6 +300,14 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             if (consultant.IsSuspended)
                 throw new InvalidOperationException("This consultant is currently unavailable for new bookings.");
 
+            // ── Verified-consultant gate (booking.requiresVerification) ──────────
+            // Previously seeded but never checked — unverified consultants could
+            // be booked exactly like verified ones.
+            var requiresVerificationRaw = await _settings.GetAsync("booking.requiresVerification");
+            var requiresVerification = requiresVerificationRaw == null || requiresVerificationRaw == "true";
+            if (requiresVerification && !consultant.IsVerified)
+                throw new InvalidOperationException("This consultant has not completed verification yet and cannot be booked.");
+
             var service = await _servicesRepo.GetSingleByAsync(s => s.Id == dto.ServiceId,
                 include: q => q.Include(s => s.Business).Include(s => s.Packages))
                 ?? throw new KeyNotFoundException("Service not found.");
@@ -218,6 +324,13 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             if (dto.ScheduledAt < DateTime.UtcNow.AddHours(1))
                 throw new InvalidOperationException("Bookings must be made at least 1 hour in advance.");
+
+            // ── Max advance booking window (booking.maxAdvanceDays) ───────────────
+            var maxAdvanceRaw = await _settings.GetAsync("booking.maxAdvanceDays");
+            if (int.TryParse(maxAdvanceRaw, out var maxAdvanceDays) && maxAdvanceDays > 0 &&
+                dto.ScheduledAt > DateTime.UtcNow.AddDays(maxAdvanceDays))
+                throw new InvalidOperationException(
+                    $"Bookings can only be made up to {maxAdvanceDays} days in advance.");
 
             var sessionEnd = dto.ScheduledAt.AddMinutes(package.DurationMinutes);
             var consultantConflict = await _consultationRepo.AnyAsync(c =>
@@ -245,6 +358,12 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             customerWallet.LastUpdated = DateTime.UtcNow;
             _walletRepo.Update(customerWallet);
 
+            // ── Auto-confirm (booking.autoConfirm) ─────────────────────────────
+            // When true, bookings skip the consultant's manual Approve step and
+            // go straight to Approved — was seeded but had no effect before.
+            var autoConfirmRaw = await _settings.GetAsync("booking.autoConfirm");
+            var autoConfirm = autoConfirmRaw == "false";
+
             var consultation = new Consultation
             {
                 Id               = Guid.NewGuid(),
@@ -255,7 +374,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 ScheduledAt      = dto.ScheduledAt,
                 EndAt            = dto.ScheduledAt.AddMinutes(package.DurationMinutes),
                 Notes            = dto.Notes,
-                Status           = "Pending",
+                Status           = autoConfirm ? "Approved" : "Pending",
                 CreatedAt        = DateTime.UtcNow,
                 IsCustomOffer    = false,
             };
@@ -326,8 +445,22 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 new { ServiceId = service.Id, ServiceName = service.ServiceName, PackageId = package.Id, PackageName = package.PackageName, Price = package.Price });
 
             FireNotification(consultant.UserId,
-                $"📋 New booking from {customer.FirstName} {customer.LastName} · {service.ServiceName} on {dto.ScheduledAt:MMM d, h:mm tt}",
-                "booking_request");
+                autoConfirm
+                    ? $"📋 New confirmed booking from {customer.FirstName} {customer.LastName} · {service.ServiceName} on {dto.ScheduledAt:MMM d, h:mm tt}"
+                    : $"📋 New booking from {customer.FirstName} {customer.LastName} · {service.ServiceName} on {dto.ScheduledAt:MMM d, h:mm tt}",
+                autoConfirm ? "booking_confirmed" : "booking_request");
+
+            FireBookingRequestEmail(consultant.Email, $"{consultant.FirstName} {consultant.LastName}",
+                $"{customer.FirstName} {customer.LastName}", service.ServiceName, dto.ScheduledAt);
+
+            if (autoConfirm)
+            {
+                FireNotification(customer.UserId,
+                    $"✅ Your booking for {service.ServiceName} is confirmed · {dto.ScheduledAt:MMM d, h:mm tt}",
+                    "booking_confirmed");
+                FireBookingConfirmedEmail(customer.Email, $"{customer.FirstName} {customer.LastName}",
+                    service.ServiceName, $"{consultant.FirstName} {consultant.LastName}", dto.ScheduledAt, package.Price);
+            }
 
             _logger.LogInformation("[Book] New booking {Id} · Customer: {Customer} · Service: {Service} · ${Amount} held in escrow.",
                 consultation.Id, customer.UserId, service.ServiceName, package.Price);
@@ -379,6 +512,9 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             FireNotification(consultation.Customer.UserId,
                 $"✅ Your booking for {consultation.Service.ServiceName} is confirmed · {consultation.ScheduledAt:MMM d, h:mm tt}",
                 "booking_confirmed");
+            FireBookingConfirmedEmail(consultation.Customer.Email, $"{consultation.Customer.FirstName} {consultation.Customer.LastName}",
+                consultation.Service.ServiceName, $"{consultation.Consultant.FirstName} {consultation.Consultant.LastName}",
+                consultation.ScheduledAt, amount);
 
             _logger.LogInformation("[Approve] Consultation {Id} approved by consultant {Consultant}.", consultationId, userId);
 
@@ -434,6 +570,13 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             FireNotification(consultation.Customer.UserId,
                 $"❌ Your booking for {consultation.Service.ServiceName} was declined · ${escrow?.Amount ?? 0} refunded",
                 "booking_rejected");
+            FireEmail(consultation.Customer.Email, $"{consultation.Customer.FirstName} {consultation.Customer.LastName}",
+                $"Booking declined — {consultation.Service.ServiceName}",
+                "Your booking was declined",
+                $"<p>Unfortunately your booking for <strong>{consultation.Service.ServiceName}</strong> was declined.</p>" +
+                $"<p><strong>Reason:</strong> {reason}</p>" +
+                $"<p>₦{escrow?.Amount ?? 0:N2} has been refunded to your wallet.</p>",
+                "Browse consultants", "https://agrichub.io/customer/browse");
 
             _logger.LogInformation("[Reject] Consultation {Id} rejected · Refunded ${Amount}.", consultationId, escrow?.Amount ?? 0);
 
@@ -558,6 +701,13 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             FireNotification(consultation.Customer.UserId,
                 $"📄 {consultation.Consultant.FirstName} {consultation.Consultant.LastName} submitted work for {consultation.Service.ServiceName} · Please review and approve",
                 "completion_submitted");
+            FireEmail(consultation.Customer.Email, $"{consultation.Customer.FirstName} {consultation.Customer.LastName}",
+                $"Work submitted for review — {consultation.Service.ServiceName}",
+                "Please review the submitted work",
+                $"<p>{consultation.Consultant.FirstName} {consultation.Consultant.LastName} has submitted their work for <strong>{consultation.Service.ServiceName}</strong>.</p>" +
+                $"<p>{summary}</p>" +
+                $"<p>Please review within {CompletionApprovalGraceHours / 24} days — it will otherwise release automatically.</p>",
+                "Review submission", "https://agrichub.io/customer/consultations");
 
             _logger.LogInformation("[Submit] Consultation {Id} submitted for review by consultant {Consultant} · File: {File}.",
                 consultationId, userId, fileUrl);
@@ -592,7 +742,8 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             var consultantWallet = await _walletRepo.GetSingleByAsync(w => w.ConsultantId == consultation.ConsultantId)
                                    ?? throw new InvalidOperationException("Consultant wallet not found.");
-            consultantWallet.Balance    += escrow.Amount;
+            var netPayout = await ApplyPlatformFeeAsync(escrow.Amount);
+            consultantWallet.Balance    += netPayout;
             consultantWallet.LastUpdated = DateTime.UtcNow;
             _walletRepo.Update(consultantWallet);
 
@@ -604,7 +755,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             {
                 CustomerId = null,
                 ConsultantId = consultation.ConsultantId,
-                Amount = escrow.Amount,
+                Amount = netPayout,
                 TransactionType = "ConsultationPayout",
                 Status = "Completed",
                 CreatedAt = DateTime.UtcNow,
@@ -618,18 +769,23 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             var amount = ResolvePrice(consultation);
             FireAdminMessage(consultation.SendbirdChannelUrl,
-                $"✅ Customer approved the submission · {consultation.Service.ServiceName} · ${amount} released to consultant wallet.");
+                $"✅ Customer approved the submission · {consultation.Service.ServiceName} · ₦{netPayout:N2} released to consultant wallet.");
 
             FireNotification(consultation.Customer.UserId,
                 $"✅ Session with {consultation.Consultant.FirstName} {consultation.Consultant.LastName} is complete · Please leave a review",
                 "session_complete");
 
             FireNotification(consultation.Consultant.UserId,
-                $"💰 ${escrow.Amount} released to your wallet · {consultation.Service.ServiceName}",
+                $"💰 ₦{netPayout:N2} released to your wallet · {consultation.Service.ServiceName}",
                 "payout_released");
+            FireEmail(consultation.Consultant.Email, $"{consultation.Consultant.FirstName} {consultation.Consultant.LastName}",
+                $"Payment released — {consultation.Service.ServiceName}",
+                "You've been paid!",
+                $"<p>₦{netPayout:N2} has been released to your wallet for <strong>{consultation.Service.ServiceName}</strong> with {consultation.Customer.FirstName} {consultation.Customer.LastName}.</p>",
+                "View wallet", "https://agrichub.io/consultant/wallet");
 
-            _logger.LogInformation("[ApproveCompletion] Consultation {Id} approved by customer · ${Amount} released to consultant.",
-                consultationId, escrow.Amount);
+            _logger.LogInformation("[ApproveCompletion] Consultation {Id} approved by customer · ₦{Amount} released to consultant.",
+                consultationId, netPayout);
 
             var resp = _mapper.Map<ConsultationResponse>(consultation);
             resp.PendingAmount = 0;
@@ -671,6 +827,13 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             FireNotification(consultation.Consultant.UserId,
                 $"🚩 A dispute was raised on your submission for {consultation.Service.ServiceName} · Our team will review and contact you",
                 "completion_disputed");
+            FireEmail(consultation.Consultant.Email, $"{consultation.Consultant.FirstName} {consultation.Consultant.LastName}",
+                $"Dispute raised — {consultation.Service.ServiceName}",
+                "A dispute was raised on your submission",
+                $"<p>{consultation.Customer.FirstName} {consultation.Customer.LastName} raised a dispute on your submission for <strong>{consultation.Service.ServiceName}</strong>.</p>" +
+                $"<p><strong>Reason:</strong> {reason}</p>" +
+                $"<p>Escrow remains held while our team reviews. We'll be in touch.</p>",
+                "View details", "https://agrichub.io/consultant/schedule");
 
             _logger.LogWarning("[Dispute] Consultation {Id} disputed by customer · Reason: {Reason} · Escrow ${Amount} frozen.",
                 consultationId, reason, escrow?.Amount ?? 0);
@@ -734,7 +897,8 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             {
                 var consultantWallet = await _walletRepo.GetSingleByAsync(w => w.ConsultantId == consultation.ConsultantId)
                     ?? throw new InvalidOperationException("Consultant wallet not found.");
-                consultantWallet.Balance    += amount;
+                var netPayout = await ApplyPlatformFeeAsync(amount);
+                consultantWallet.Balance    += netPayout;
                 consultantWallet.LastUpdated = DateTime.UtcNow;
                 _walletRepo.Update(consultantWallet);
 
@@ -746,7 +910,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 {
                     CustomerId = null,
                     ConsultantId = consultation.ConsultantId,
-                    Amount = amount,
+                    Amount = netPayout,
                     TransactionType = "DisputeResolvedPayout",
                     Status = "Completed",
                     CreatedAt = DateTime.UtcNow,
@@ -757,10 +921,10 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 consultation.CompletedAt = DateTime.UtcNow;
 
                 FireAdminMessage(consultation.SendbirdChannelUrl,
-                    $"✅ Dispute resolved by our team — submission approved. ${amount} released to consultant."
+                    $"✅ Dispute resolved by our team — submission approved. ₦{netPayout:N2} released to consultant."
                     + (string.IsNullOrWhiteSpace(notes) ? "" : $" Notes: {notes}"));
                 FireNotification(consultation.Consultant.UserId,
-                    $"✅ Dispute resolved in your favor · ${amount} released to your wallet · {consultation.Service.ServiceName}",
+                    $"✅ Dispute resolved in your favor · ₦{netPayout:N2} released to your wallet · {consultation.Service.ServiceName}",
                     "payout_released");
                 FireNotification(consultation.Customer.UserId,
                     $"Our team reviewed your dispute and approved the consultant's work · {consultation.Service.ServiceName}",
@@ -841,7 +1005,8 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             var consultantWallet = await _walletRepo.GetSingleByAsync(w => w.ConsultantId == consultation.ConsultantId)
                                    ?? throw new InvalidOperationException("Consultant wallet not found.");
-            consultantWallet.Balance    += escrow.Amount;
+            var netPayout = await ApplyPlatformFeeAsync(escrow.Amount);
+            consultantWallet.Balance    += netPayout;
             consultantWallet.LastUpdated = DateTime.UtcNow;
             _walletRepo.Update(consultantWallet);
 
@@ -853,7 +1018,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             {
                 CustomerId = null,
                 ConsultantId = consultation.ConsultantId,
-                Amount = escrow.Amount,
+                Amount = netPayout,
                 TransactionType = "ConsultationPayout",
                 Status = "Completed",
                 CreatedAt = DateTime.UtcNow,
@@ -867,18 +1032,18 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             var amount = ResolvePrice(consultation);
             FireAdminMessage(consultation.SendbirdChannelUrl,
-                $"⏰ Review window expired · ${amount} automatically released to consultant wallet · {consultation.Service.ServiceName}.");
+                $"⏰ Review window expired · ₦{netPayout:N2} automatically released to consultant wallet · {consultation.Service.ServiceName}.");
 
             FireNotification(consultation.Customer.UserId,
                 $"⏰ Your {CompletionApprovalGraceHours / 24}-day review window for {consultation.Service.ServiceName} expired · payment was released automatically",
                 "session_complete");
 
             FireNotification(consultation.Consultant.UserId,
-                $"💰 ${escrow.Amount} automatically released to your wallet (review window expired) · {consultation.Service.ServiceName}",
+                $"💰 ₦{netPayout:N2} automatically released to your wallet (review window expired) · {consultation.Service.ServiceName}",
                 "payout_released");
 
-            _logger.LogInformation("[ApprovalExpiry] Consultation {Id} auto-released ${Amount} to consultant (frontend trigger).",
-                consultationId, escrow.Amount);
+            _logger.LogInformation("[ApprovalExpiry] Consultation {Id} auto-released ₦{Amount} to consultant (frontend trigger).",
+                consultationId, netPayout);
         }
 
         // ── Cancel ──────────────────────────────────────────────────────────────
@@ -900,6 +1065,26 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 throw new InvalidOperationException(
                     "You cannot cancel after the scheduled start time. Please start the session or request a reschedule. " +
                     "If you did not attend, the customer may report a no-show.");
+
+            // ── Cancellation window (booking.cancellationHours) ───────────────────
+            // Previously seeded but unused — any party could cancel right up to
+            // (and, for customers, even past) the scheduled start with a full
+            // refund. Now blocks cancellation once inside the configured window,
+            // directing them toward reschedule/no-show instead. Consultants
+            // already have their own post-start block above, so this only
+            // meaningfully restricts customer-side last-minute cancellations.
+            if (!isConsultant)
+            {
+                var cancellationHoursRaw = await _settings.GetAsync("booking.cancellationHours");
+                if (int.TryParse(cancellationHoursRaw, out var cancellationHours) && cancellationHours > 0 &&
+                    consultation.Status == "Approved" &&
+                    DateTime.UtcNow > consultation.ScheduledAt.AddHours(-cancellationHours))
+                {
+                    throw new InvalidOperationException(
+                        $"Cancellations must be made at least {cancellationHours}h before the scheduled time. " +
+                        "If the consultant doesn't show up, you can report a no-show instead once the session time passes.");
+                }
+            }
 
             var escrow = await FindEscrowAsync(consultationId);
             if (escrow != null)
@@ -935,11 +1120,26 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             var cancelledByCustomer = (await _customerRepo.GetSingleByAsync(c => c.UserId == userId)) != null;
             if (cancelledByCustomer && consultation.Consultant != null)
+            {
                 FireNotification(consultation.Consultant.UserId,
                     $"⚠️ Booking cancelled by customer · {consultation.Service?.ServiceName}", "booking_cancelled");
+                FireEmail(consultation.Consultant.Email, $"{consultation.Consultant.FirstName} {consultation.Consultant.LastName}",
+                    $"Booking cancelled — {consultation.Service?.ServiceName}",
+                    "A booking was cancelled",
+                    $"<p>{consultation.Customer?.FirstName} {consultation.Customer?.LastName} cancelled their booking for <strong>{consultation.Service?.ServiceName}</strong> scheduled {consultation.ScheduledAt:MMM d, h:mm tt}.</p>",
+                    "View schedule", "https://agrichub.io/consultant/schedule");
+            }
             else if (!cancelledByCustomer && consultation.Customer != null)
+            {
                 FireNotification(consultation.Customer.UserId,
                     $"⚠️ Booking cancelled by consultant · ${escrow?.Amount ?? 0} refunded", "booking_cancelled");
+                FireEmail(consultation.Customer.Email, $"{consultation.Customer.FirstName} {consultation.Customer.LastName}",
+                    $"Booking cancelled — {consultation.Service?.ServiceName}",
+                    "Your booking was cancelled",
+                    $"<p>{consultation.Consultant?.FirstName} {consultation.Consultant?.LastName} cancelled your booking for <strong>{consultation.Service?.ServiceName}</strong>.</p>" +
+                    $"<p>₦{escrow?.Amount ?? 0:N2} has been refunded to your wallet.</p>",
+                    "Browse consultants", "https://agrichub.io/customer/browse");
+            }
 
             _logger.LogInformation("[Cancel] Consultation {Id} cancelled by {CancelledBy} · Refunded ${Amount}.",
                 consultationId, cancelledByCustomer ? "customer" : "consultant", escrow?.Amount ?? 0);
@@ -1094,22 +1294,23 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 var consultantWallet = await _walletRepo.GetSingleByAsync(w => w.ConsultantId == consultation.ConsultantId);
                 if (consultantWallet == null) { _logger.LogWarning("[ApprovalExpiry] Consultant wallet not found for consultation {Id} — skipping.", consultation.Id); continue; }
 
-                consultantWallet.Balance += escrow.Amount; consultantWallet.LastUpdated = DateTime.UtcNow;
+                var netPayout = await ApplyPlatformFeeAsync(escrow.Amount);
+                consultantWallet.Balance += netPayout; consultantWallet.LastUpdated = DateTime.UtcNow;
                 _walletRepo.Update(consultantWallet);
                 escrow.Status = "Released"; escrow.ResolvedAt = DateTime.UtcNow;
                 _pendingTransactionRepo.Update(escrow);
-                await _walletTransactionRepo.AddAsync(new WalletTransaction { CustomerId = null, ConsultantId = consultation.ConsultantId, Amount = escrow.Amount, TransactionType = "ConsultationPayout", Status = "Completed", CreatedAt = DateTime.UtcNow, CompletedAt = DateTime.UtcNow });
+                await _walletTransactionRepo.AddAsync(new WalletTransaction { CustomerId = null, ConsultantId = consultation.ConsultantId, Amount = netPayout, TransactionType = "ConsultationPayout", Status = "Completed", CreatedAt = DateTime.UtcNow, CompletedAt = DateTime.UtcNow });
 
                 consultation.Status = "Completed"; consultation.CompletedAt = DateTime.UtcNow;
                 await _consultationRepo.UpdateAsync(consultation);
 
                 var amount = ResolvePrice(consultation);
-                _logger.LogInformation("[ApprovalExpiry] Auto-released ${Amount} to consultant for consultation {Id} · {Service}.",
-                    amount, consultation.Id, consultation.Service?.ServiceName);
+                _logger.LogInformation("[ApprovalExpiry] Auto-released ₦{Amount} to consultant for consultation {Id} · {Service}.",
+                    netPayout, consultation.Id, consultation.Service?.ServiceName);
 
-                FireAdminMessage(consultation.SendbirdChannelUrl, $"⏰ Review window expired · ${amount} automatically released to consultant wallet · {consultation.Service.ServiceName}.");
+                FireAdminMessage(consultation.SendbirdChannelUrl, $"⏰ Review window expired · ₦{netPayout:N2} automatically released to consultant wallet · {consultation.Service.ServiceName}.");
                 FireNotification(consultation.Customer.UserId, $"⏰ Your {CompletionApprovalGraceHours / 24}-day review window for {consultation.Service.ServiceName} expired · payment was released automatically", "session_complete");
-                FireNotification(consultation.Consultant.UserId, $"💰 ${escrow.Amount} automatically released to your wallet (review window expired) · {consultation.Service.ServiceName}", "payout_released");
+                FireNotification(consultation.Consultant.UserId, $"💰 ₦{netPayout:N2} automatically released to your wallet (review window expired) · {consultation.Service.ServiceName}", "payout_released");
             }
 
             if (all.Any()) await _unitOfWork.SaveChangesAsync();
@@ -1149,7 +1350,8 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
                 if (escrow != null)
                 {
-                    var consultantPayout = totalAmount * CustomerNoShowPayoutPercentage;
+                    var noShowPercent = await GetNoShowConsultantPayoutPercentAsync();
+                    var consultantPayout = totalAmount * noShowPercent;
                     var customerRefund = totalAmount - consultantPayout;
 
                     var cWallet = await _walletRepo.GetSingleByAsync(w => w.CustomerId    == consultation.CustomerId);
@@ -1219,6 +1421,14 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                 $"📅 Session rescheduled to {newScheduledAt:MMM d, h:mm tt} · {consultation.Service.ServiceName}", "rescheduled");
             FireNotification(consultation.Consultant.UserId,
                 $"📅 Customer rescheduled the session to {newScheduledAt:MMM d, h:mm tt} · {consultation.Service.ServiceName}", "rescheduled");
+
+            var rescheduleBody = $"<p><strong>{consultation.Service.ServiceName}</strong> has been rescheduled from {oldDate:MMM d, h:mm tt} to <strong>{newScheduledAt:MMM d, h:mm tt}</strong>.</p>";
+            FireEmail(consultation.Customer.Email, $"{consultation.Customer.FirstName} {consultation.Customer.LastName}",
+                $"Session rescheduled — {consultation.Service.ServiceName}", "Your session was rescheduled", rescheduleBody,
+                "View consultations", "https://agrichub.io/customer/consultations");
+            FireEmail(consultation.Consultant.Email, $"{consultation.Consultant.FirstName} {consultation.Consultant.LastName}",
+                $"Session rescheduled — {consultation.Service.ServiceName}", "A session was rescheduled", rescheduleBody,
+                "View schedule", "https://agrichub.io/consultant/schedule");
 
             _logger.LogInformation("[Reschedule] Consultation {Id} rescheduled from {Old} to {New} UTC.",
                 consultationId, oldDate, newScheduledAt);
@@ -1308,7 +1518,8 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             if (escrow != null)
             {
-                var consultantPayout = totalAmount * CustomerNoShowPayoutPercentage;
+                var noShowPercent = await GetNoShowConsultantPayoutPercentAsync();
+                var consultantPayout = totalAmount * noShowPercent;
                 var customerRefund = totalAmount - consultantPayout;
 
                 var cWallet = await _walletRepo.GetSingleByAsync(w => w.CustomerId    == consultation.CustomerId)  ?? throw new InvalidOperationException("Customer wallet not found.");
