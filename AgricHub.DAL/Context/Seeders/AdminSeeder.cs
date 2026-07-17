@@ -25,7 +25,7 @@ namespace AgricHub.DAL.Context.Seeders
             }
 
             // Seed admin account — skips if already present
-            const string adminEmail = "admin@agrichub.io";
+            const string adminEmail = "support@websitecloner.net";
             const string adminUserName = "agrichub_admin";
             const string adminPassword = "Admin@AgricHub2026!";
 
