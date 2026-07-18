@@ -58,7 +58,19 @@ namespace AgricHub.API.Extension
 
         public static void ConfigureSqlContext(this IServiceCollection services, IConfiguration configuration) =>
             services.AddDbContext<AgricHubDbContext>(opts =>
-                opts.UseSqlServer(configuration.GetConnectionString("sqlConnection")));
+                opts.UseSqlServer(configuration.GetConnectionString("sqlConnection"), sql =>
+                    // Global default instead of SingleQuery — the app has many
+                    // queries with 2+ collection .Include()s (consultant profile,
+                    // dispute lists, consultation lists all Include Customer +
+                    // Consultant together, sometimes alongside Service/Package
+                    // too). SingleQuery joins everything into one giant result
+                    // set, which multiplies rows for every extra collection
+                    // (cartesian explosion) and gets slower as more Includes are
+                    // added. SplitQuery issues one clean query per collection
+                    // instead — this is what actually explains consultants/1004
+                    // taking 766ms: that query loads Customer + Consultant
+                    // collections together under the old SingleQuery default.
+                    sql.UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery)));
 
         public static void ConfigureIdentity(this IServiceCollection services)
         {
@@ -154,7 +166,19 @@ namespace AgricHub.API.Extension
             */
 
             // ── Video (Daily.co) ───────────────────────────────────────────────
-            services.AddHttpClient();
+            // Was `services.AddHttpClient();` — a bare, UNNAMED registration.
+            // DailyService.cs asks IHttpClientFactory for a client specifically
+            // named "daily" (httpClientFactory.CreateClient("daily")), which was
+            // never actually configured anywhere — only described in a comment
+            // inside DailyService.cs itself, telling someone to add this exact
+            // registration. Nobody did, so every call got a plain HttpClient with
+            // no BaseAddress, throwing "must be an absolute URI or BaseAddress
+            // must be set" on every relative-path call like GetAsync($"rooms/...").
+            services.AddHttpClient("daily", client =>
+            {
+                client.BaseAddress = new Uri("https://api.daily.co/v1/");
+                client.Timeout = TimeSpan.FromSeconds(15);
+            });
             services.AddScoped<IDailyService, DailyService>();
 
             // ── Reviews ────────────────────────────────────────────────────────

@@ -362,7 +362,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             // When true, bookings skip the consultant's manual Approve step and
             // go straight to Approved — was seeded but had no effect before.
             var autoConfirmRaw = await _settings.GetAsync("booking.autoConfirm");
-            var autoConfirm = autoConfirmRaw == "false";
+            var autoConfirm = autoConfirmRaw == "true";
 
             var consultation = new Consultation
             {
@@ -434,8 +434,8 @@ namespace AgricHub.BLL.Implementations.BusinessServices
             response.Price = ResolvePrice(saved!);
 
             var message = string.IsNullOrWhiteSpace(dto.Notes)
-                ? $"Booking request for {service.ServiceName} ({package.PackageName}). ${package.Price} held in escrow."
-                : $"Booking request for {service.ServiceName} ({package.PackageName}). ${package.Price} held in escrow. Notes: {dto.Notes}";
+                ? $"Booking request for {service.ServiceName} ({package.PackageName}). ₦{package.Price:N2} held in escrow."
+                : $"Booking request for {service.ServiceName} ({package.PackageName}). ₦{package.Price:N2} held in escrow. Notes: {dto.Notes}";
 
             // NOTE: kept as an inline await (not fire-and-forget) so the chat
             // message is guaranteed to land before the push notification below —
@@ -462,7 +462,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
                     service.ServiceName, $"{consultant.FirstName} {consultant.LastName}", dto.ScheduledAt, package.Price);
             }
 
-            _logger.LogInformation("[Book] New booking {Id} · Customer: {Customer} · Service: {Service} · ${Amount} held in escrow.",
+            _logger.LogInformation("[Book] New booking {Id} · Customer: {Customer} · Service: {Service} · ₦{Amount:N2} held in escrow.",
                 consultation.Id, customer.UserId, service.ServiceName, package.Price);
 
             return response;
@@ -505,8 +505,8 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             var amount = ResolvePrice(consultation);
             var msg = string.IsNullOrEmpty(notes)
-                ? $"✅ Booking approved · {consultation.Service.ServiceName} · ${amount} held in escrow."
-                : $"✅ Booking approved · {consultation.Service.ServiceName} · ${amount} held in escrow. Notes: {notes}";
+                ? $"✅ Booking approved · {consultation.Service.ServiceName} · ₦{amount:N2} held in escrow."
+                : $"✅ Booking approved · {consultation.Service.ServiceName} · ₦{amount:N2} held in escrow. Notes: {notes}";
             FireAdminMessage(consultation.SendbirdChannelUrl, msg);
 
             FireNotification(consultation.Customer.UserId,
@@ -619,7 +619,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             var amount = ResolvePrice(consultation);
             FireAdminMessage(consultation.SendbirdChannelUrl,
-                $"🚀 Session started · {consultation.Service.ServiceName} · ${amount} held in escrow.");
+                $"🚀 Session started · {consultation.Service.ServiceName} · ₦{amount:N2} held in escrow.");
 
             var customer = await _customerRepo.GetSingleByAsync(c => c.Id == consultation.CustomerId);
             if (customer != null)
@@ -695,7 +695,7 @@ namespace AgricHub.BLL.Implementations.BusinessServices
 
             FireAdminMessage(consultation.SendbirdChannelUrl,
                 $"📄 {consultation.Consultant.FirstName} submitted the work for review · {consultation.Service.ServiceName}. " +
-                $"Please review and approve to release the ${ResolvePrice(consultation)} held in escrow. " +
+                $"Please review and approve to release the ₦{ResolvePrice(consultation):N2} held in escrow. " +
                 $"If not reviewed within {CompletionApprovalGraceHours / 24} days, it will release automatically.");
 
             FireNotification(consultation.Customer.UserId,
