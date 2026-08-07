@@ -12,7 +12,8 @@ namespace AgricHub.BLL.Interfaces.IUserServices
 {
     Task<object> GetVerificationStatusAsync();
     Task SubmitVerificationAsync(SubmitVerificationRequest req);
-}
+        Task WithdrawVerificationAsync();
+    }
 
 public class SubmitVerificationRequest
 {

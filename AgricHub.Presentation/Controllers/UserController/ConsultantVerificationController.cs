@@ -9,11 +9,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-
 namespace AgricHub.Presentation.Controllers.UserController
 {
-
-
     [ApiController]
     [Route("api/consultant/profile")]
     [Authorize(Roles = "Consultant")]
@@ -26,7 +23,6 @@ namespace AgricHub.Presentation.Controllers.UserController
             try { return Ok(await verifService.GetVerificationStatusAsync()); }
             catch (KeyNotFoundException e) { return NotFound(new { message = e.Message }); }
         }
-
         // POST /api/consultant/profile/verification
         [HttpPost("verification")]
         [RequestSizeLimit(20 * 1024 * 1024)]
@@ -37,7 +33,6 @@ namespace AgricHub.Presentation.Controllers.UserController
         {
             if (businessReg is null || credentials is null)
                 return BadRequest(new { message = "Business registration and credentials are required." });
-
             try
             {
                 await verifService.SubmitVerificationAsync(new SubmitVerificationRequest
@@ -49,6 +44,21 @@ namespace AgricHub.Presentation.Controllers.UserController
                 return Ok(new { message = "Verification submitted successfully." });
             }
             catch (InvalidOperationException e) { return Conflict(new { message = e.Message }); }
+            catch (KeyNotFoundException e) { return NotFound(new { message = e.Message }); }
+        }
+
+        // DELETE /api/consultant/profile/verification
+        // Was entirely missing — the frontend's withdraw() button has been
+        // calling this route since it was built, but nothing on the backend
+        // ever answered it, producing a clean 404/error every time.
+        [HttpDelete("verification")]
+        public async Task<IActionResult> Withdraw()
+        {
+            try
+            {
+                await verifService.WithdrawVerificationAsync();
+                return Ok(new { message = "Verification application withdrawn." });
+            }
             catch (KeyNotFoundException e) { return NotFound(new { message = e.Message }); }
         }
     }

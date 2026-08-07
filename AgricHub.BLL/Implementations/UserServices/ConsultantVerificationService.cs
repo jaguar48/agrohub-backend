@@ -104,6 +104,30 @@ namespace AgricHub.BLL.Implementations
             await _unitOfWork.SaveChangesAsync();
         }
 
+        /// <summary>
+        /// Withdraws the consultant's own pending application. Sets Status to
+        /// "Withdrawn" rather than deleting the row — matches the app's
+        /// existing convention everywhere else (cancelled bookings, resolved
+        /// disputes, etc. are never hard-deleted, just status-transitioned)
+        /// so an audit trail survives. Deliberately NOT "Pending", so
+        /// SubmitVerificationAsync's own duplicate-pending check no longer
+        /// blocks a fresh resubmission — matches the "you can resubmit when
+        /// ready" message the frontend already shows after a successful
+        /// withdraw.
+        /// </summary>
+        public async Task WithdrawVerificationAsync()
+        {
+            var userId = GetUserId();
+
+            var pending = await _verifRepo.GetSingleByAsync(
+                v => v.UserId == userId && v.Status == "Pending")
+                ?? throw new KeyNotFoundException("No pending verification application found.");
+
+            pending.Status = "Withdrawn";
+            _verifRepo.Update(pending);
+            await _unitOfWork.SaveChangesAsync();
+        }
+
         private static async Task<string> SaveFile(
             IFormFile file, string dir, string label, int consultantId)
         {
